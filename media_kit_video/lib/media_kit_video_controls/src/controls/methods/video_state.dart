@@ -24,6 +24,16 @@ ValueNotifier<VideoViewParameters> videoViewParametersNotifier(
 VideoController controller(BuildContext context) =>
     VideoStateInheritedWidget.of(context).state.widget.controller;
 
+/// Seeks the player to [position], delegating to [VideoController.seekHandler]
+/// when set. This allows callers (e.g. [MediaPlayerHandler]) to intercept seeks
+/// and reload the HLS stream when seeking backward past the buffer boundary.
+Future<void> doSeek(BuildContext context, Duration position) {
+  final c = controller(context);
+  final handler = c.seekHandler;
+  if (handler != null) return handler(position);
+  return c.player.seek(position);
+}
+
 /// Returns the callback which must be invoked when the video enters fullscreen mode.
 Future<void> Function()? onEnterFullscreen(BuildContext context) =>
     VideoStateInheritedWidget.of(context).state.widget.onEnterFullscreen;

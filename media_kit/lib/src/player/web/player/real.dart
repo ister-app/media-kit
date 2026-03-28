@@ -128,13 +128,17 @@ class WebPlayer extends PlatformPlayer {
               final end = state
                   .playlist.medias[state.playlist.index].end?.inMilliseconds;
               if (position != null) {
-                position = Duration(
-                  milliseconds: position.inMilliseconds.clamp(
-                    start ?? 0,
-                    // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number/MAX_SAFE_INTEGER
-                    end ?? 9007199254740991,
-                  ),
-                );
+                // Only clamp to [Media.end] — [Media.start] is an initial seek
+                // position, not a hard lower boundary, so do not restrict seeks
+                // below it after playback has started.
+                if (end != null) {
+                  position = Duration(
+                    milliseconds: position.inMilliseconds.clamp(
+                      0,
+                      end,
+                    ),
+                  );
+                }
 
                 if (position ==
                     state.playlist.medias[state.playlist.index].end) {
@@ -335,6 +339,10 @@ class WebPlayer extends PlatformPlayer {
         web.URL.revokeObjectURL(_subtitleBlobUrl!);
         _subtitleBlobUrl = null;
       }
+
+      _startSeekSubscription?.cancel();
+      _startSeekSubscription = null;
+      _destroyHls();
 
       disposed = true;
 
@@ -1304,9 +1312,20 @@ class WebPlayer extends PlatformPlayer {
         if (!trackController.isClosed) {
           trackController.add(state.track);
         }
+      } else if (['no', 'auto'].contains(track.id)) {
+        // No direct HLS.js API for disabling audio — no action needed.
+      } else if (_hls != null) {
+        final index = int.tryParse(track.id);
+        if (index != null && index >= 0) {
+          _hls!.audioTrack = index;
+          state = state.copyWith(track: state.track.copyWith(audio: track));
+          if (!trackController.isClosed) {
+            trackController.add(state.track);
+          }
+        }
       } else {
         throw UnsupportedError(
-          '[Player.setAudioTrack] is only supported with [AudioTrack.uri] on web',
+          '[Player.setAudioTrack] is only supported with [AudioTrack.uri] on web (non-HLS streams)',
         );
       }
     }
@@ -1337,7 +1356,10 @@ class WebPlayer extends PlatformPlayer {
       }
 
       if (['no', 'auto'].contains(track.id)) {
-        // No action needed for these tracks.
+        if (track.id == 'no' && _hls != null) {
+          _hls!.subtitleTrack = -1;
+        }
+        // 'auto': HLS.js handles default selection automatically.
       } else if (track.uri || track.data) {
         final String uri;
         if (track.uri) {
@@ -1421,9 +1443,18 @@ class WebPlayer extends PlatformPlayer {
         element.appendChild(child);
         child.src = uri;
         child.track.mode = 'hidden';
+      } else if (_hls != null) {
+        final index = int.tryParse(track.id);
+        if (index != null && index >= 0) {
+          _hls!.subtitleTrack = index;
+          state = state.copyWith(track: state.track.copyWith(subtitle: track));
+          if (!trackController.isClosed) {
+            trackController.add(state.track);
+          }
+        }
       } else {
         throw UnsupportedError(
-          '[Player.setSubtitleTrack] is only supported with [SubtitleTrack.uri] & [SubtitleTrack.data] on web',
+          '[Player.setSubtitleTrack] is only supported with [SubtitleTrack.uri] & [SubtitleTrack.data] on web (non-HLS streams)',
         );
       }
     }
@@ -1495,7 +1526,170 @@ class WebPlayer extends PlatformPlayer {
     }
   }
 
+  void _destroyHls() {
+    if (_hls != null) {
+      try {
+        _hls!.destroy();
+      } catch (_) {}
+      _hls = null;
+    }
+  }
+
+  void _refreshHlsTracks() {
+    if (_hls == null) return;
+    lock.synchronized(() async {
+      try {
+        if (_hls == null) return;
+
+        final subtitleList = <SubtitleTrack>[
+          SubtitleTrack.auto(),
+          SubtitleTrack.no(),
+        ];
+        for (final t in _hls!.subtitleTracks.toDart) {
+          final id =
+              (t.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+          final name = (t.getProperty('name'.toJS) as JSString).toDart;
+          final lang =
+              (t.getProperty<JSAny?>('lang'.toJS) as JSString?)?.toDart;
+          subtitleList.add(SubtitleTrack(id.toString(), name, lang));
+        }
+
+        final audioList = <AudioTrack>[
+          AudioTrack.auto(),
+          AudioTrack.no(),
+        ];
+        for (final t in _hls!.audioTracks.toDart) {
+          final id =
+              (t.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+          final name = (t.getProperty('name'.toJS) as JSString).toDart;
+          final lang =
+              (t.getProperty<JSAny?>('lang'.toJS) as JSString?)?.toDart;
+          audioList.add(AudioTrack(id.toString(), name, lang));
+        }
+
+        state = state.copyWith(
+          tracks: Tracks(
+            video: state.tracks.video,
+            audio: audioList,
+            subtitle: subtitleList,
+          ),
+        );
+        if (!tracksController.isClosed) tracksController.add(state.tracks);
+      } catch (e, s) {
+        print(e);
+        print(s);
+      }
+    });
+  }
+
+  void _onHlsSubtitleTracksUpdated(JSString eventName, JSObject data) {
+    lock.synchronized(() async {
+      try {
+        final tracks =
+            (data.getProperty('subtitleTracks'.toJS) as JSArray<JSObject>)
+                .toDart;
+        final subtitleList = <SubtitleTrack>[
+          SubtitleTrack.auto(),
+          SubtitleTrack.no(),
+        ];
+        for (final t in tracks) {
+          final id =
+              (t.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+          final name = (t.getProperty('name'.toJS) as JSString).toDart;
+          final lang =
+              (t.getProperty<JSAny?>('lang'.toJS) as JSString?)?.toDart;
+          subtitleList.add(SubtitleTrack(id.toString(), name, lang));
+        }
+        state = state.copyWith(
+          tracks: Tracks(
+            video: state.tracks.video,
+            audio: state.tracks.audio,
+            subtitle: subtitleList,
+          ),
+        );
+        if (!tracksController.isClosed) tracksController.add(state.tracks);
+      } catch (e, s) {
+        print(e);
+        print(s);
+      }
+    });
+  }
+
+  void _onHlsSubtitleTrackSwitch(JSString eventName, JSObject data) {
+    lock.synchronized(() async {
+      try {
+        final id = (data.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+        final selected = id < 0
+            ? SubtitleTrack.no()
+            : state.tracks.subtitle.firstWhere(
+                (t) => t.id == id.toString(),
+                orElse: () => SubtitleTrack.auto(),
+              );
+        state = state.copyWith(track: state.track.copyWith(subtitle: selected));
+        if (!trackController.isClosed) trackController.add(state.track);
+      } catch (e, s) {
+        print(e);
+        print(s);
+      }
+    });
+  }
+
+  void _onHlsAudioTracksUpdated(JSString eventName, JSObject data) {
+    lock.synchronized(() async {
+      try {
+        final tracks =
+            (data.getProperty('audioTracks'.toJS) as JSArray<JSObject>)
+                .toDart;
+        final audioList = <AudioTrack>[
+          AudioTrack.auto(),
+          AudioTrack.no(),
+        ];
+        for (final t in tracks) {
+          final id =
+              (t.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+          final name = (t.getProperty('name'.toJS) as JSString).toDart;
+          final lang =
+              (t.getProperty<JSAny?>('lang'.toJS) as JSString?)?.toDart;
+          audioList.add(AudioTrack(id.toString(), name, lang));
+        }
+        state = state.copyWith(
+          tracks: Tracks(
+            video: state.tracks.video,
+            audio: audioList,
+            subtitle: state.tracks.subtitle,
+          ),
+        );
+        if (!tracksController.isClosed) tracksController.add(state.tracks);
+      } catch (e, s) {
+        print(e);
+        print(s);
+      }
+    });
+  }
+
+  void _onHlsAudioTrackSwitched(JSString eventName, JSObject data) {
+    lock.synchronized(() async {
+      try {
+        final id = (data.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+        final selected = state.tracks.audio.firstWhere(
+          (t) => t.id == id.toString(),
+          orElse: () => AudioTrack.auto(),
+        );
+        state = state.copyWith(track: state.track.copyWith(audio: selected));
+        if (!trackController.isClosed) trackController.add(state.track);
+      } catch (e, s) {
+        print(e);
+        print(s);
+      }
+    });
+  }
+
   void _loadSource(Media media) {
+    // Cancel any pending start-position seek from a previous load.
+    _startSeekSubscription?.cancel();
+    _startSeekSubscription = null;
+    _destroyHls();
+
     try {
       if (_isHLS(media.uri)) {
         void setHlsHTTPHeaders(web.XMLHttpRequest xhr, String url) {
@@ -1512,10 +1706,23 @@ class WebPlayer extends PlatformPlayer {
           ),
         );
 
+        hls.on(HlsEvents.subtitleTracksUpdated,
+            _onHlsSubtitleTracksUpdated.toJS);
+        hls.on(
+            HlsEvents.subtitleTrackSwitch, _onHlsSubtitleTrackSwitch.toJS);
+        hls.on(
+            HlsEvents.audioTracksUpdated, _onHlsAudioTracksUpdated.toJS);
+        hls.on(HlsEvents.audioTrackSwitched, _onHlsAudioTrackSwitched.toJS);
+
         hls.loadSource(media.uri);
         hls.attachMedia(element);
+        _hls = hls;
+
+        // Fallback: read tracks directly from the HLS instance after metadata
+        // loads, in case the hlsSubtitleTracksUpdated / hlsAudioTracksUpdated
+        // events have already fired or are not received.
+        element.onLoadedMetadata.first.then((_) => _refreshHlsTracks());
       } else {
-        // Default
         String src = media.uri;
 
         // https://www.w3.org/TR/media-frags/
@@ -1528,6 +1735,18 @@ class WebPlayer extends PlatformPlayer {
 
         element.src = src;
       }
+
+      // Explicitly seek to start once metadata is available. This is needed
+      // for HLS (where #t= fragment is not applied) and as a reliable
+      // fallback for other sources where the fragment may be ignored.
+      if (media.start != null) {
+        final target = media.start!.inMilliseconds / 1000.0;
+        _startSeekSubscription = element.onLoadedMetadata.listen((_) {
+          element.currentTime = target;
+          _startSeekSubscription?.cancel();
+          _startSeekSubscription = null;
+        });
+      }
     } catch (exception) {
       // PlayerStream.error
       final e = exception as web.DOMException;
@@ -1538,14 +1757,14 @@ class WebPlayer extends PlatformPlayer {
   }
 
   bool _isHLS(String src) {
-    final userAgent = web.window.navigator.userAgent;
-    final isAndroidChrome =
-        userAgent.contains("Android") && userAgent.contains("Chrome");
-
-    if (!isAndroidChrome &&
-        element.canPlayType('application/vnd.apple.mpegurl') != '') {
-      return false;
-    }
+    // final userAgent = web.window.navigator.userAgent;
+    // final isAndroidChrome =
+    //     userAgent.contains("Android") && userAgent.contains("Chrome");
+    //
+    // if (!isAndroidChrome &&
+    //     element.canPlayType('application/vnd.apple.mpegurl') != '') {
+    //   return false;
+    // }
     if (isHLSSupported() && src.toLowerCase().contains('m3u8')) {
       return true;
     }
@@ -1655,6 +1874,12 @@ class WebPlayer extends PlatformPlayer {
 
   /// Current subtitle blob URL to revoke when changing tracks or disposing.
   String? _subtitleBlobUrl;
+
+  /// Active [Hls] instance for HLS streams. Null for non-HLS sources.
+  Hls? _hls;
+
+  /// Pending subscription to seek to [Media.start] once metadata loads.
+  StreamSubscription? _startSeekSubscription;
 
   /// Synchronization & mutual exclusion between methods of this class.
   final Lock lock = Lock();

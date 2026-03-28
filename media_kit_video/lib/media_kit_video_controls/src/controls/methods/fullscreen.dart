@@ -3,6 +3,8 @@
 /// Copyright © 2021 & onwards, Hitesh Kumar Saini <saini123hitesh@gmail.com>.
 /// All rights reserved.
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:synchronized/synchronized.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -25,6 +27,8 @@ Future<void> enterFullscreen(BuildContext context) {
         final videoViewParametersNotifierValue =
             videoViewParametersNotifier(context);
         final controllerValue = controller(context);
+        final player = controllerValue.player;
+        final wasPlaying = player.state.playing;
         Navigator.of(context, rootNavigator: true).push(
           PageRouteBuilder(
             pageBuilder: (_, __, ___) => Material(
@@ -84,6 +88,12 @@ Future<void> enterFullscreen(BuildContext context) {
           ),
         );
         await onEnterFullscreen(context)?.call();
+        // On web, moving the <video> element in the DOM during the fullscreen
+        // route transition can fire a browser 'pause' event, causing the player
+        // state to flip to paused. Restore playback if this happened.
+        if (wasPlaying && !player.state.playing) {
+          await player.play();
+        }
       }
     }
   });
@@ -94,10 +104,30 @@ Future<void> exitFullscreen(BuildContext context) {
   return lock.synchronized(() async {
     if (isFullscreen(context)) {
       if (context.mounted) {
+        final player = controller(context).player;
+        final wasPlaying = player.state.playing;
         await Navigator.of(context).maybePop();
         // It is known that this [context] will have a [FullscreenInheritedWidget] above it.
         if (context.mounted) {
           FullscreenInheritedWidget.of(context).parent.refreshView();
+        }
+        // On web, the route's full disposal moves the <video> element in the
+        // DOM, which can fire a spurious browser 'pause' event across multiple
+        // frames. Call play() now and watch the playing stream briefly to
+        // re-play if a spurious pause arrives after the first frame.
+        if (wasPlaying) {
+          await WidgetsBinding.instance.endOfFrame;
+          await player.play();
+          StreamSubscription<bool>? sub;
+          sub = player.stream.playing.listen((isPlaying) {
+            if (!isPlaying) {
+              sub?.cancel();
+              sub = null;
+              player.play();
+            }
+          });
+          await Future.delayed(const Duration(milliseconds: 500));
+          sub?.cancel();
         }
       }
       // [exitNativeFullscreen] is moved to [WillPopScope] in [FullscreenInheritedWidget].

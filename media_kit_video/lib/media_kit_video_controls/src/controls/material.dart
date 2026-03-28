@@ -748,7 +748,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
         Duration.zero,
         controller(context).player.state.duration,
       );
-      controller(context).player.seek(newPosition);
+      doSeek(context,newPosition);
     }
 
     setState(() {
@@ -1411,7 +1411,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                                               .state
                                               .duration,
                                         );
-                                        controller(context).player.seek(result);
+                                        doSeek(context,result);
                                       },
                                     ),
                                   )
@@ -1467,7 +1467,7 @@ class _MaterialVideoControlsState extends State<_MaterialVideoControls> {
                                               .state
                                               .duration,
                                         );
-                                        controller(context).player.seek(result);
+                                        doSeek(context,result);
                                       },
                                     ),
                                   )
@@ -1550,9 +1550,11 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
             });
           }),
           controller(context).player.stream.completed.listen((event) {
-            setState(() {
-              position = Duration.zero;
-            });
+            if (event) {
+              setState(() {
+                position = Duration.zero;
+              });
+            }
           }),
           controller(context).player.stream.position.listen((event) {
             setState(() {
@@ -1591,7 +1593,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       tapped = true;
       slider = percent.clamp(0.0, 1.0);
     });
-    controller(context).player.seek(duration * slider);
+    doSeek(context,duration * slider);
   }
 
   void onPointerDown() {
@@ -1608,7 +1610,7 @@ class MaterialSeekBarState extends State<MaterialSeekBar> {
       tapped = false;
       position = duration * slider;
     });
-    controller(context).player.seek(duration * slider);
+    doSeek(context,duration * slider);
   }
 
   void onPanStart(DragStartDetails e, BoxConstraints constraints) {

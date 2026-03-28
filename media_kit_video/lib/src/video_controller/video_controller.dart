@@ -68,6 +68,11 @@ class VideoController {
   /// [Rect] of the video output, received from the native implementation.
   final ValueNotifier<Rect?> rect = ValueNotifier<Rect?>(null);
 
+  /// Optional seek handler. When set, the video controls call this instead of
+  /// [player.seek] so the caller can intercept seeks (e.g. to reload the HLS
+  /// stream when seeking backward past the buffer boundary).
+  Future<void> Function(Duration position)? seekHandler;
+
   /// {@macro video_controller}
   VideoController(
     this.player, {

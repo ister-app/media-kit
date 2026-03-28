@@ -7,6 +7,9 @@ import 'package:flutter/widgets.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import 'package:media_kit_video/media_kit_video_controls/src/controls/methods/video_state.dart';
+import 'package:media_kit_video/media_kit_video_controls/src/controls/methods/fullscreen.dart';
+import 'fullscreen_listener_stub.dart'
+    if (dart.library.js_interop) 'fullscreen_listener_web.dart';
 
 /// {@template fullscreen_inherited_widget}
 ///
@@ -59,6 +62,29 @@ class _FullscreenInheritedWidgetPopScope extends StatefulWidget {
 
 class _FullscreenInheritedWidgetPopScopeState
     extends State<_FullscreenInheritedWidgetPopScope> {
+  VoidCallback? _cancelFullscreenListener;
+
+  @override
+  void initState() {
+    super.initState();
+    // On web, pressing Escape exits browser native fullscreen but does not
+    // pop the Flutter route. Listen for the fullscreenchange event and call
+    // exitFullscreen so the route is popped in sync with the browser state.
+    _cancelFullscreenListener = listenForBrowserFullscreenExit(() {
+      if (mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) exitFullscreen(context);
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _cancelFullscreenListener?.call();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope(

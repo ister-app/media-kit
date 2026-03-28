@@ -65,9 +65,9 @@ abstract class HLS {
   }
 
   static const String kHLSAsset =
-      'assets/packages/media_kit/assets/web/hls1.4.10.js';
+      'assets/packages/media_kit/assets/web/hls1.6.15.js';
   static const String kHLSCDN =
-      'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.10/hls.js';
+      'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.15/hls.js';
 
   static final Lock _lock = Lock();
   static bool _initialized = false;
@@ -106,6 +106,26 @@ class Hls {
 extension ExtensionHls on Hls {
   external void loadSource(String src);
   external void attachMedia(web.HTMLVideoElement video);
+}
+
+// --------------------------------------------------
+
+extension ExtensionHlsTracks on Hls {
+  external JSArray<JSObject> get subtitleTracks;
+  external int get subtitleTrack;
+  external set subtitleTrack(int index);
+  external JSArray<JSObject> get audioTracks;
+  external int get audioTrack;
+  external set audioTrack(int index);
+  external void on(String event, JSFunction callback);
+  external void destroy();
+}
+
+abstract class HlsEvents {
+  static const subtitleTracksUpdated = 'hlsSubtitleTracksUpdated';
+  static const subtitleTrackSwitch = 'hlsSubtitleTrackSwitch';
+  static const audioTracksUpdated = 'hlsAudioTracksUpdated';
+  static const audioTrackSwitched = 'hlsAudioTrackSwitched';
 }
 
 // --------------------------------------------------

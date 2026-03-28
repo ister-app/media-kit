@@ -74,7 +74,8 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
 void video_output_set_texture_update_callback(
     VideoOutput* self,
     TextureUpdateCallback texture_update_callback,
-    gpointer texture_update_callback_context);
+    gpointer texture_update_callback_context,
+    GDestroyNotify texture_update_callback_context_destroy);
 
 /**
  * @brief Sets the required video output size. This forces |VideoOutput| to
@@ -89,8 +90,6 @@ void video_output_set_texture_update_callback(
 void video_output_set_size(VideoOutput* self, gint64 width, gint64 height);
 
 mpv_render_context* video_output_get_render_context(VideoOutput* self);
-
-GdkGLContext* video_output_get_gdk_gl_context(VideoOutput* self);
 
 EGLDisplay video_output_get_egl_display(VideoOutput* self);
 
@@ -107,5 +106,17 @@ gint64 video_output_get_height(VideoOutput* self);
 gint64 video_output_get_texture_id(VideoOutput* self);
 
 void video_output_notify_texture_update(VideoOutput* self);
+
+/**
+ * @brief Atomically reads the front buffer state under front_mutex.
+ *
+ * Called from the Flutter raster thread (populate_texture). Returns TRUE if
+ * the front image is valid and has non-zero dimensions.
+ */
+gboolean video_output_get_front_image(VideoOutput* self,
+                                      EGLImageKHR* out_image,
+                                      guint32* out_width,
+                                      guint32* out_height,
+                                      gboolean* out_dirty);
 
 #endif  // VIDEO_OUTPUT_H_

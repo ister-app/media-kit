@@ -543,22 +543,22 @@ class _MaterialDesktopVideoControlsState
               const SingleActivator(LogicalKeyboardKey.keyJ): () {
                 final rate = controller(context).player.state.position -
                     const Duration(seconds: 10);
-                controller(context).player.seek(rate);
+                doSeek(context,rate);
               },
               const SingleActivator(LogicalKeyboardKey.keyI): () {
                 final rate = controller(context).player.state.position +
                     const Duration(seconds: 10);
-                controller(context).player.seek(rate);
+                doSeek(context,rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
                 final rate = controller(context).player.state.position -
                     const Duration(seconds: 2);
-                controller(context).player.seek(rate);
+                doSeek(context,rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowRight): () {
                 final rate = controller(context).player.state.position +
                     const Duration(seconds: 2);
-                controller(context).player.seek(rate);
+                doSeek(context,rate);
               },
               const SingleActivator(LogicalKeyboardKey.arrowUp): () {
                 final volume = controller(context).player.state.volume + 5.0;
@@ -929,9 +929,11 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
             });
           }),
           controller(context).player.stream.completed.listen((event) {
-            setState(() {
-              position = Duration.zero;
-            });
+            if (event) {
+              setState(() {
+                position = Duration.zero;
+              });
+            }
           }),
           controller(context).player.stream.position.listen((event) {
             setState(() {
@@ -967,7 +969,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       hover = true;
       slider = percent.clamp(0.0, 1.0);
     });
-    controller(context).player.seek(duration * slider);
+    doSeek(context,duration * slider);
   }
 
   void onPointerDown() {
@@ -984,7 +986,7 @@ class MaterialDesktopSeekBarState extends State<MaterialDesktopSeekBar> {
       click = false;
       position = duration * slider;
     });
-    controller(context).player.seek(duration * slider);
+    doSeek(context,duration * slider);
   }
 
   void onHover(PointerHoverEvent e, BoxConstraints constraints) {

@@ -24,6 +24,10 @@ TextureGL* texture_gl_new(VideoOutput* video_output);
 
 /**
  * @brief Populates texture with video frame.
+ *
+ * Called on Flutter's raster thread. Reads the front EGLImage produced by the
+ * dedicated render thread and binds it to Flutter's GL texture — no EGL
+ * context switch required.
  */
 gboolean texture_gl_populate_texture(FlTextureGL* texture,
                                      guint32* target,

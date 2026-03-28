@@ -280,7 +280,7 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (widget.pauseUponEnteringBackgroundMode) {
+    if (widget.pauseUponEnteringBackgroundMode && !_fullscreenTransitioning) {
       if ([
         AppLifecycleState.paused,
         AppLifecycleState.detached,
@@ -460,23 +460,34 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
 // --------------------------------------------------
 
+/// Set to true while a native fullscreen transition is in progress to prevent
+/// the [AppLifecycleState.paused] event (triggered by the browser's blur during
+/// requestFullscreen / exitFullscreen) from pausing playback.
+bool _fullscreenTransitioning = false;
+
 /// Makes the native window enter fullscreen.
 Future<void> defaultEnterNativeFullscreen() async {
   try {
+    _fullscreenTransitioning = true;
     await document.documentElement?.requestFullscreen().toDart;
   } catch (exception, stacktrace) {
     debugPrint(exception.toString());
     debugPrint(stacktrace.toString());
+  } finally {
+    _fullscreenTransitioning = false;
   }
 }
 
 /// Makes the native window exit fullscreen.
 Future<void> defaultExitNativeFullscreen() async {
   try {
+    _fullscreenTransitioning = true;
     await document.exitFullscreen().toDart;
   } catch (exception, stacktrace) {
     debugPrint(exception.toString());
     debugPrint(stacktrace.toString());
+  } finally {
+    _fullscreenTransitioning = false;
   }
 }
 

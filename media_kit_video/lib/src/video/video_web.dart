@@ -509,26 +509,52 @@ void _listenForWebkitEndFullscreen(HTMLVideoElement video) {
   video.addEventListener('webkitendfullscreen', _webkitEndFullscreenListener);
 }
 
+/// Whether this is an iPhone (or iPod touch). On these, the Fullscreen API is
+/// unreliable: `requestFullscreen` may exist on the element yet reject at call
+/// time, which would leave the page-level fullscreen route as the only result.
+/// The native player is the only dependable fullscreen there.
+bool get _isIPhone {
+  final agent = window.navigator.userAgent;
+  return agent.contains('iPhone') || agent.contains('iPod');
+}
+
+/// Shows the video in the native player (iOS), which is its own fullscreen.
+/// Returns false when the element doesn't support it.
+bool _enterNativeVideoFullscreen() {
+  final video = _videoElement();
+  if (video == null ||
+      !video.hasProperty('webkitEnterFullscreen'.toJS).toDart) {
+    return false;
+  }
+  _listenForWebkitEndFullscreen(video);
+  video.callMethod('webkitEnterFullscreen'.toJS);
+  return true;
+}
+
 /// Makes the native window enter fullscreen.
 ///
-/// iPhone Safari does not implement the Fullscreen API on elements (only iPad &
-/// desktop do), so there we fall back to the native player on the <video>
-/// element itself: `HTMLVideoElement.webkitEnterFullscreen`.
+/// On iPhone the Fullscreen API can't be relied on, so there the <video>
+/// element's own native player is used instead (`webkitEnterFullscreen`).
+/// Elsewhere the Fullscreen API is used, with the native player as a fallback
+/// when it is missing or its request is rejected — otherwise a rejected request
+/// would silently leave the video non-fullscreen inside the page.
 Future<void> defaultEnterNativeFullscreen() async {
   try {
     _fullscreenTransitioning = true;
+    if (_isIPhone && _enterNativeVideoFullscreen()) {
+      return;
+    }
     final element = document.documentElement;
     if (element != null &&
         element.hasProperty('requestFullscreen'.toJS).toDart) {
-      await element.requestFullscreen().toDart;
-      return;
+      try {
+        await element.requestFullscreen().toDart;
+        return;
+      } catch (exception) {
+        debugPrint(exception.toString());
+      }
     }
-    final video = _videoElement();
-    if (video != null &&
-        video.hasProperty('webkitEnterFullscreen'.toJS).toDart) {
-      _listenForWebkitEndFullscreen(video);
-      video.callMethod('webkitEnterFullscreen'.toJS);
-    }
+    _enterNativeVideoFullscreen();
   } catch (exception, stacktrace) {
     debugPrint(exception.toString());
     debugPrint(stacktrace.toString());

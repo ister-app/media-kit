@@ -5,6 +5,7 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 // ignore_for_file: avoid_web_libraries_in_flutter
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
 import 'package:web/web.dart';
 import 'dart:async';
@@ -304,6 +305,9 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // The native iOS player (used when the Fullscreen API is unavailable) can
+    // be closed with its own button; pop the Flutter fullscreen route with it.
+    onNativeVideoFullscreenEnd.add(_onNativeFullscreenEnd);
     // --------------------------------------------------
     // Do not show the video frame until width & height are available.
     // Since [ValueNotifier<Rect?>] inside [VideoController] only gets updated by the render loop (i.e. it will not fire when video's width & height are not available etc.), it's important to handle this separately here.
@@ -352,9 +356,18 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
     }
   }
 
+  void _onNativeFullscreenEnd() {
+    final context = _contextNotifier.value;
+    if (!mounted || context == null) return;
+    if (media_kit_video_controls.isFullscreen(context)) {
+      media_kit_video_controls.exitFullscreen(context);
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    onNativeVideoFullscreenEnd.remove(_onNativeFullscreenEnd);
     _wakelock.disable();
     for (final subscription in _subscriptions) {
       subscription.cancel();
@@ -465,11 +478,57 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 /// requestFullscreen / exitFullscreen) from pausing playback.
 bool _fullscreenTransitioning = false;
 
+/// Invoked when the native iOS player leaves fullscreen, so the Flutter
+/// fullscreen route can be popped along with it. Every mounted [VideoState]
+/// registers itself; the fullscreen route adds a second one, so this is a set
+/// rather than a single callback.
+final Set<void Function()> onNativeVideoFullscreenEnd = {};
+
+/// The <video> element rendered by the web player.
+HTMLVideoElement? _videoElement() =>
+    document.querySelector('video') as HTMLVideoElement?;
+
+EventListener? _webkitEndFullscreenListener;
+
+/// Listen for the user closing the native iOS player (its own "done" button),
+/// which leaves fullscreen without going through [defaultExitNativeFullscreen].
+void _listenForWebkitEndFullscreen(HTMLVideoElement video) {
+  if (_webkitEndFullscreenListener != null) {
+    video.removeEventListener(
+      'webkitendfullscreen',
+      _webkitEndFullscreenListener,
+    );
+  }
+  void onEnd(Event event) {
+    for (final callback in onNativeVideoFullscreenEnd.toList()) {
+      callback();
+    }
+  }
+
+  _webkitEndFullscreenListener = onEnd.toJS;
+  video.addEventListener('webkitendfullscreen', _webkitEndFullscreenListener);
+}
+
 /// Makes the native window enter fullscreen.
+///
+/// iPhone Safari does not implement the Fullscreen API on elements (only iPad &
+/// desktop do), so there we fall back to the native player on the <video>
+/// element itself: `HTMLVideoElement.webkitEnterFullscreen`.
 Future<void> defaultEnterNativeFullscreen() async {
   try {
     _fullscreenTransitioning = true;
-    await document.documentElement?.requestFullscreen().toDart;
+    final element = document.documentElement;
+    if (element != null &&
+        element.hasProperty('requestFullscreen'.toJS).toDart) {
+      await element.requestFullscreen().toDart;
+      return;
+    }
+    final video = _videoElement();
+    if (video != null &&
+        video.hasProperty('webkitEnterFullscreen'.toJS).toDart) {
+      _listenForWebkitEndFullscreen(video);
+      video.callMethod('webkitEnterFullscreen'.toJS);
+    }
   } catch (exception, stacktrace) {
     debugPrint(exception.toString());
     debugPrint(stacktrace.toString());
@@ -482,7 +541,16 @@ Future<void> defaultEnterNativeFullscreen() async {
 Future<void> defaultExitNativeFullscreen() async {
   try {
     _fullscreenTransitioning = true;
-    await document.exitFullscreen().toDart;
+    if (document.hasProperty('exitFullscreen'.toJS).toDart &&
+        document.fullscreenElement != null) {
+      await document.exitFullscreen().toDart;
+      return;
+    }
+    final video = _videoElement();
+    if (video != null &&
+        video.hasProperty('webkitExitFullscreen'.toJS).toDart) {
+      video.callMethod('webkitExitFullscreen'.toJS);
+    }
   } catch (exception, stacktrace) {
     debugPrint(exception.toString());
     debugPrint(stacktrace.toString());

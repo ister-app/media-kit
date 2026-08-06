@@ -16,6 +16,14 @@
 #include <gdk/gdkwayland.h>
 #include <gdk/gdkx.h>
 
+// glEGLImageTargetTexture2DOES extension function pointer.
+typedef void (*PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)(GLenum target,
+                                                    GLeglImageOES image);
+
+#ifndef glEGLImageTargetTexture2DOES
+static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES = NULL;
+#endif
+
 // EGL extension function pointers (file-scope statics, guarded to avoid
 // redefinition when epoxy already provides the symbol as a macro/function).
 #ifndef eglCreateImageKHR
@@ -40,6 +48,11 @@ static EGLint (*eglClientWaitSyncKHR)(EGLDisplay, EGLSyncKHR, EGLint,
 #endif
 
 static gpointer vo_init_egl_extensions_once(gpointer data) {
+#ifndef glEGLImageTargetTexture2DOES
+  glEGLImageTargetTexture2DOES =
+      (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
+          "glEGLImageTargetTexture2DOES");
+#endif
 #ifndef eglCreateImageKHR
   eglCreateImageKHR =
       (EGLImageKHR(*)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer,
@@ -73,6 +86,19 @@ static void vo_init_egl_extensions() {
   g_once(&once, vo_init_egl_extensions_once, NULL);
 }
 
+#define VIDEO_OUTPUT_BUFFER_COUNT 3
+
+/* One entry of the triple-buffer ring. The FBO and mpv texture live in the
+ * render thread's EGL context; the EGLImage is the cross-context handle the
+ * raster thread binds to Flutter's texture. */
+typedef struct {
+  GLuint fbo;
+  GLuint mpv_texture;
+  EGLImageKHR egl_image;
+  guint32 width;
+  guint32 height;
+} BufferSlot;
+
 struct _VideoOutput {
   GObject parent_instance;
   TextureGL* texture_gl;
@@ -99,21 +125,20 @@ struct _VideoOutput {
   GCond render_cond;
   gboolean render_requested;
 
-  /* ---- Back buffer (render thread only) ---- */
-  GLuint back_fbo;
-  GLuint back_mpv_texture;
-  EGLImageKHR back_egl_image;
-  guint32 back_width;
-  guint32 back_height;
-
-  /* ---- Front buffer (shared, protected by front_mutex) ---- */
-  GMutex front_mutex;
-  GLuint front_fbo;
-  GLuint front_mpv_texture;
-  EGLImageKHR front_egl_image;
-  guint32 front_width;
-  guint32 front_height;
-  gboolean front_dirty;
+  /* ---- Buffer ring (slot ownership protected by buffer_mutex) ----
+   *
+   * Triple buffering with mailbox semantics. The render thread only ever
+   * writes into (or rebuilds) a slot that is neither |display_slot| nor
+   * |ready_slot|; with three slots such a slot always exists. The raster
+   * thread promotes |ready_slot| to |display_slot| and binds its EGLImage
+   * while still holding |buffer_mutex|, so the render thread can never
+   * touch an image the Flutter texture references. GL resources inside a
+   * slot are created/destroyed by the render thread only (and by dispose
+   * after the thread has been joined). */
+  GMutex buffer_mutex;
+  BufferSlot buffers[VIDEO_OUTPUT_BUFFER_COUNT];
+  gint display_slot; /* bound to Flutter's texture; -1 = none yet */
+  gint ready_slot;   /* newest rendered frame awaiting the raster thread */
 
   /* ---- Video-dimensions cache (avoids mpv_get_property every frame) ---- */
   GMutex dims_mutex;
@@ -128,6 +153,25 @@ G_DEFINE_TYPE(VideoOutput, video_output, G_TYPE_OBJECT)
 // ---------------------------------------------------------------------------
 // Render thread
 // ---------------------------------------------------------------------------
+
+/* Render thread (or dispose, after join) only — requires the render EGL
+ * context to be current. */
+static void buffer_slot_destroy(VideoOutput* self, BufferSlot* slot) {
+  if (slot->egl_image != EGL_NO_IMAGE_KHR) {
+    eglDestroyImageKHR(self->egl_display, slot->egl_image);
+    slot->egl_image = EGL_NO_IMAGE_KHR;
+  }
+  if (slot->fbo) {
+    glDeleteFramebuffers(1, &slot->fbo);
+    slot->fbo = 0;
+  }
+  if (slot->mpv_texture) {
+    glDeleteTextures(1, &slot->mpv_texture);
+    slot->mpv_texture = 0;
+  }
+  slot->width = 0;
+  slot->height = 0;
+}
 
 static gpointer render_thread_func(gpointer data) {
   VideoOutput* self = (VideoOutput*)data;
@@ -153,26 +197,39 @@ static gpointer render_thread_func(gpointer data) {
     gint32 h = (gint32)video_output_get_height(self);
 
     if (w > 0 && h > 0) {
-      // Rebuild back buffer when dimensions changed (or on first frame when
-      // back resources are still zero / came from initial front swap).
-      if (w != (gint32)self->back_width || h != (gint32)self->back_height) {
-        // Destroy stale back resources.
-        if (self->back_egl_image != EGL_NO_IMAGE_KHR) {
-          eglDestroyImageKHR(self->egl_display, self->back_egl_image);
-          self->back_egl_image = EGL_NO_IMAGE_KHR;
+      // Pick a slot that the raster thread cannot be reading: neither the
+      // one bound to Flutter's texture nor the pending mailbox frame. With
+      // three slots one always exists. Ownership indices only change on the
+      // raster thread (consume) and below (publish), and neither ever makes
+      // a slot equal to the one chosen here.
+      g_mutex_lock(&self->buffer_mutex);
+      gint slot_index = -1;
+      for (gint i = 0; i < VIDEO_OUTPUT_BUFFER_COUNT; i++) {
+        if (i != self->display_slot && i != self->ready_slot) {
+          slot_index = i;
+          break;
         }
-        if (self->back_fbo) {
-          glDeleteFramebuffers(1, &self->back_fbo);
-          self->back_fbo = 0;
-        }
-        if (self->back_mpv_texture) {
-          glDeleteTextures(1, &self->back_mpv_texture);
-          self->back_mpv_texture = 0;
-        }
+      }
+      g_mutex_unlock(&self->buffer_mutex);
+
+      if (slot_index < 0) {
+        // Invariant violation — should be impossible with 3 slots.
+        g_printerr("media_kit: render_thread: no writable buffer slot.\n");
+        g_mutex_lock(&self->render_mutex);
+        continue;
+      }
+
+      BufferSlot* slot = &self->buffers[slot_index];
+
+      // (Re)build the slot's resources when dimensions changed or it was
+      // never built.
+      if (slot->fbo == 0 || w != (gint32)slot->width ||
+          h != (gint32)slot->height) {
+        buffer_slot_destroy(self, slot);
 
         // Create texture.
-        glGenTextures(1, &self->back_mpv_texture);
-        glBindTexture(GL_TEXTURE_2D, self->back_mpv_texture);
+        glGenTextures(1, &slot->mpv_texture);
+        glBindTexture(GL_TEXTURE_2D, slot->mpv_texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -182,10 +239,10 @@ static gpointer render_thread_func(gpointer data) {
         glBindTexture(GL_TEXTURE_2D, 0);
 
         // Create FBO.
-        glGenFramebuffers(1, &self->back_fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, self->back_fbo);
+        glGenFramebuffers(1, &slot->fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, slot->fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                               GL_TEXTURE_2D, self->back_mpv_texture, 0);
+                               GL_TEXTURE_2D, slot->mpv_texture, 0);
         GLenum fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -193,26 +250,23 @@ static gpointer render_thread_func(gpointer data) {
           g_printerr(
               "media_kit: render_thread: Framebuffer incomplete: 0x%x\n",
               fbo_status);
-          glDeleteFramebuffers(1, &self->back_fbo);
-          self->back_fbo = 0;
-          glDeleteTextures(1, &self->back_mpv_texture);
-          self->back_mpv_texture = 0;
+          buffer_slot_destroy(self, slot);
           g_mutex_lock(&self->render_mutex);
           continue;
         }
 
         // Create EGLImage from the new texture.
         EGLint img_attribs[] = {EGL_NONE};
-        self->back_egl_image = eglCreateImageKHR(
+        slot->egl_image = eglCreateImageKHR(
             self->egl_display, self->egl_context, EGL_GL_TEXTURE_2D_KHR,
-            (EGLClientBuffer)(guintptr)self->back_mpv_texture, img_attribs);
+            (EGLClientBuffer)(guintptr)slot->mpv_texture, img_attribs);
 
-        self->back_width = (guint32)w;
-        self->back_height = (guint32)h;
+        slot->width = (guint32)w;
+        slot->height = (guint32)h;
       }
 
-      // Render mpv frame into back buffer.
-      mpv_opengl_fbo fbo = {(gint32)self->back_fbo, w, h, 0};
+      // Render mpv frame into the slot.
+      mpv_opengl_fbo fbo = {(gint32)slot->fbo, w, h, 0};
       int flip_y = 0;
       mpv_render_param params[] = {
           {MPV_RENDER_PARAM_OPENGL_FBO, &fbo},
@@ -239,30 +293,12 @@ static gpointer render_thread_func(gpointer data) {
         glFlush();
       }
 
-      // Swap back <-> front (full resource swap, no GPU copy).
-      g_mutex_lock(&self->front_mutex);
-
-      EGLImageKHR tmp_img = self->front_egl_image;
-      self->front_egl_image = self->back_egl_image;
-      self->back_egl_image = tmp_img;
-
-      GLuint tmp_fbo = self->front_fbo;
-      self->front_fbo = self->back_fbo;
-      self->back_fbo = tmp_fbo;
-
-      GLuint tmp_tex = self->front_mpv_texture;
-      self->front_mpv_texture = self->back_mpv_texture;
-      self->back_mpv_texture = tmp_tex;
-
-      guint32 tmp_w = self->front_width;
-      guint32 tmp_h = self->front_height;
-      self->front_width = self->back_width;
-      self->front_height = self->back_height;
-      self->back_width = tmp_w;
-      self->back_height = tmp_h;
-
-      self->front_dirty = TRUE;
-      g_mutex_unlock(&self->front_mutex);
+      // Publish the slot as the mailbox frame. A previous unconsumed ready
+      // frame simply becomes free again — the raster thread always gets the
+      // newest frame.
+      g_mutex_lock(&self->buffer_mutex);
+      self->ready_slot = slot_index;
+      g_mutex_unlock(&self->buffer_mutex);
 
       fl_texture_registrar_mark_texture_frame_available(
           self->texture_registrar, FL_TEXTURE(self->texture_gl));
@@ -326,30 +362,11 @@ static void video_output_dispose(GObject* object) {
     }
 
     // 7. Clean up all GL/EGL resources (egl_context is current).
-    if (self->back_egl_image != EGL_NO_IMAGE_KHR) {
-      eglDestroyImageKHR(self->egl_display, self->back_egl_image);
-      self->back_egl_image = EGL_NO_IMAGE_KHR;
+    for (gint i = 0; i < VIDEO_OUTPUT_BUFFER_COUNT; i++) {
+      buffer_slot_destroy(self, &self->buffers[i]);
     }
-    if (self->back_fbo) {
-      glDeleteFramebuffers(1, &self->back_fbo);
-      self->back_fbo = 0;
-    }
-    if (self->back_mpv_texture) {
-      glDeleteTextures(1, &self->back_mpv_texture);
-      self->back_mpv_texture = 0;
-    }
-    if (self->front_egl_image != EGL_NO_IMAGE_KHR) {
-      eglDestroyImageKHR(self->egl_display, self->front_egl_image);
-      self->front_egl_image = EGL_NO_IMAGE_KHR;
-    }
-    if (self->front_fbo) {
-      glDeleteFramebuffers(1, &self->front_fbo);
-      self->front_fbo = 0;
-    }
-    if (self->front_mpv_texture) {
-      glDeleteTextures(1, &self->front_mpv_texture);
-      self->front_mpv_texture = 0;
-    }
+    self->display_slot = -1;
+    self->ready_slot = -1;
 
     // 8. Release and destroy the isolated EGL context.
     if (self->egl_context != EGL_NO_CONTEXT) {
@@ -383,7 +400,7 @@ static void video_output_dispose(GObject* object) {
   g_mutex_clear(&self->mutex);
   g_mutex_clear(&self->render_mutex);
   g_cond_clear(&self->render_cond);
-  g_mutex_clear(&self->front_mutex);
+  g_mutex_clear(&self->buffer_mutex);
   g_mutex_clear(&self->dims_mutex);
   G_OBJECT_CLASS(video_output_parent_class)->dispose(object);
 }
@@ -417,21 +434,17 @@ static void video_output_init(VideoOutput* self) {
   g_mutex_init(&self->render_mutex);
   g_cond_init(&self->render_cond);
 
-  // Back buffer.
-  self->back_fbo = 0;
-  self->back_mpv_texture = 0;
-  self->back_egl_image = EGL_NO_IMAGE_KHR;
-  self->back_width = 0;
-  self->back_height = 0;
-
-  // Front buffer.
-  g_mutex_init(&self->front_mutex);
-  self->front_fbo = 0;
-  self->front_mpv_texture = 0;
-  self->front_egl_image = EGL_NO_IMAGE_KHR;
-  self->front_width = 0;
-  self->front_height = 0;
-  self->front_dirty = FALSE;
+  // Buffer ring.
+  g_mutex_init(&self->buffer_mutex);
+  for (gint i = 0; i < VIDEO_OUTPUT_BUFFER_COUNT; i++) {
+    self->buffers[i].fbo = 0;
+    self->buffers[i].mpv_texture = 0;
+    self->buffers[i].egl_image = EGL_NO_IMAGE_KHR;
+    self->buffers[i].width = 0;
+    self->buffers[i].height = 0;
+  }
+  self->display_slot = -1;
+  self->ready_slot = -1;
 
   // Dimensions cache.
   g_mutex_init(&self->dims_mutex);
@@ -832,17 +845,36 @@ void video_output_notify_texture_update(VideoOutput* self) {
   }
 }
 
-gboolean video_output_get_front_image(VideoOutput* self,
-                                      EGLImageKHR* out_image,
-                                      guint32* out_width,
-                                      guint32* out_height,
-                                      gboolean* out_dirty) {
-  g_mutex_lock(&self->front_mutex);
-  *out_image = self->front_egl_image;
-  *out_width = self->front_width;
-  *out_height = self->front_height;
-  *out_dirty = self->front_dirty;
-  self->front_dirty = FALSE;
-  g_mutex_unlock(&self->front_mutex);
-  return *out_image != EGL_NO_IMAGE_KHR && *out_width > 0 && *out_height > 0;
+gboolean video_output_bind_display_image(VideoOutput* self,
+                                         guint32 texture_name,
+                                         guint32* out_width,
+                                         guint32* out_height) {
+  g_mutex_lock(&self->buffer_mutex);
+
+  if (self->ready_slot >= 0) {
+    // Consume the mailbox frame: promote it to display (the old display
+    // slot becomes free for the render thread). The bind happens while
+    // still holding buffer_mutex so the slot can never be recycled between
+    // being claimed and being attached to Flutter's texture.
+    self->display_slot = self->ready_slot;
+    self->ready_slot = -1;
+    BufferSlot* slot = &self->buffers[self->display_slot];
+    glBindTexture(GL_TEXTURE_2D, texture_name);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D,
+                                 (GLeglImageOES)slot->egl_image);
+    glBindTexture(GL_TEXTURE_2D, 0);
+  }
+
+  if (self->display_slot < 0) {
+    g_mutex_unlock(&self->buffer_mutex);
+    return FALSE;
+  }
+
+  BufferSlot* slot = &self->buffers[self->display_slot];
+  *out_width = slot->width;
+  *out_height = slot->height;
+  gboolean valid =
+      slot->egl_image != EGL_NO_IMAGE_KHR && slot->width > 0 && slot->height > 0;
+  g_mutex_unlock(&self->buffer_mutex);
+  return valid;
 }

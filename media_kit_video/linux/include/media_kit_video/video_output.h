@@ -108,15 +108,18 @@ gint64 video_output_get_texture_id(VideoOutput* self);
 void video_output_notify_texture_update(VideoOutput* self);
 
 /**
- * @brief Atomically reads the front buffer state under front_mutex.
+ * @brief Binds the newest rendered frame to |texture_name| (GL_TEXTURE_2D).
  *
- * Called from the Flutter raster thread (populate_texture). Returns TRUE if
- * the front image is valid and has non-zero dimensions.
+ * Called from the Flutter raster thread (populate_texture). Claims the
+ * pending frame (if any) and performs the EGLImage bind atomically under the
+ * buffer mutex, so the render thread can never write into — or destroy — an
+ * image the Flutter texture references. When no new frame is pending the
+ * existing binding is left untouched and the current dimensions are
+ * returned. Returns FALSE while no valid frame has been produced yet.
  */
-gboolean video_output_get_front_image(VideoOutput* self,
-                                      EGLImageKHR* out_image,
-                                      guint32* out_width,
-                                      guint32* out_height,
-                                      gboolean* out_dirty);
+gboolean video_output_bind_display_image(VideoOutput* self,
+                                         guint32 texture_name,
+                                         guint32* out_width,
+                                         guint32* out_height);
 
 #endif  // VIDEO_OUTPUT_H_

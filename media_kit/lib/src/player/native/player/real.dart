@@ -108,9 +108,6 @@ class NativePlayer extends PlatformPlayer {
 
       disposed = true;
 
-      _seekSubtitleTimer?.cancel();
-      _seekSubtitleTimer = null;
-
       await super.dispose();
 
       Initializer(mpv).dispose(ctx);
@@ -723,7 +720,6 @@ class NativePlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
 
       final seekPos = (duration.inMilliseconds / 1000).toStringAsFixed(4);
-      print('[SEEK] seek to $seekPos, current sub="${state.subtitle[0]}"');
       await _command(['seek', seekPos, 'absolute']);
 
       // Clear stale subtitle overlay text on seek.
@@ -734,31 +730,6 @@ class NativePlayer extends PlatformPlayer {
       if (!subtitleController.isClosed) {
         subtitleController.add(state.subtitle);
       }
-
-      // The primary subtitle-restore path is the seeking=false property event
-      // (see the 'seeking' handler in the event loop), which fires exactly when
-      // mpv finishes the seek and has loaded subtitle data. The timer below is a
-      // fallback for edge cases where the seeking property does not toggle (e.g.
-      // instant seeks when playback is already paused). Cancel any stale timer
-      // so rapid seeks don't stack.
-      _seekSubtitleTimer?.cancel();
-      _seekSubtitleTimer = Timer(const Duration(milliseconds: 600), () async {
-        if (disposed) return;
-        final subText =
-            await getProperty('sub-text', waitForInitialization: false);
-        print('[SEEK] 600ms timer: sub-text="$subText" state="${state.subtitle[0]}"');
-        if (subText.isNotEmpty && state.subtitle[0].isEmpty) {
-          final seen = <String>{};
-          final deduped = subText
-              .split('\n')
-              .where((line) => seen.add(line))
-              .join('\n');
-          state = state.copyWith(subtitle: [deduped, state.subtitle[1]]);
-          if (!subtitleController.isClosed) {
-            subtitleController.add(state.subtitle);
-          }
-        }
-      });
 
       // It is self explanatory that PlayerState.completed & PlayerStream.completed must enter the false state if seek is called. Typically after EOF.
       // https://github.com/media-kit/media-kit/issues/221
@@ -1185,19 +1156,6 @@ class NativePlayer extends PlatformPlayer {
         );
         if (!trackController.isClosed) {
           trackController.add(state.track);
-        }
-        // Read the currently active subtitle text immediately. mpv only fires
-        // sub-text change events for cues that START after the track switch,
-        // so any cue that is already active at this moment is never observed.
-        final currentSubText = await getProperty(
-          'sub-text',
-          waitForInitialization: false,
-        );
-        if (currentSubText.isNotEmpty) {
-          state = state.copyWith(subtitle: [currentSubText, state.subtitle[1]]);
-          if (!subtitleController.isClosed) {
-            subtitleController.add(state.subtitle);
-          }
         }
       }
     }
@@ -2047,7 +2005,6 @@ class NativePlayer extends PlatformPlayer {
               .split('\n')
               .where((line) => seen.add(line))
               .join('\n');
-          print('[SUB-TEXT] event: rawLen=${rawText.length} text="${text.length > 60 ? text.substring(0, 60) : text}"');
           state = state.copyWith(
             subtitle: [
               text,
@@ -2094,35 +2051,6 @@ class NativePlayer extends PlatformPlayer {
             subtitleController.add(state.subtitle);
           }
         }
-      }
-      if (prop.ref.name.cast<Utf8>().toDartString() == 'seeking' &&
-          prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
-        final nowSeeking = prop.ref.data.cast<Int8>().value == 1;
-        print('[SEEK] seeking property: _isSeeking=$_isSeeking nowSeeking=$nowSeeking');
-        if (_isSeeking && !nowSeeking) {
-          // Seek just completed. Poll sub-text immediately so that cues already
-          // active at the new position are displayed. The regular sub-text
-          // property-change event may not fire if the value didn't change from
-          // mpv's perspective (e.g. same cue text as before seek), and the
-          // timer-based poll in seek() may have fired too early.
-          _seekSubtitleTimer?.cancel();
-          _seekSubtitleTimer = null;
-          final subText =
-              await getProperty('sub-text', waitForInitialization: false);
-          print('[SEEK] seeking=false poll: sub-text="$subText"');
-          if (subText.isNotEmpty) {
-            final seen = <String>{};
-            final deduped = subText
-                .split('\n')
-                .where((line) => seen.add(line))
-                .join('\n');
-            state = state.copyWith(subtitle: [deduped, state.subtitle[1]]);
-            if (!subtitleController.isClosed) {
-              subtitleController.add(state.subtitle);
-            }
-          }
-        }
-        _isSeeking = nowSeeking;
       }
       if (prop.ref.name.cast<Utf8>().toDartString() == 'eof-reached' &&
           prop.ref.format == generated.mpv_format.MPV_FORMAT_FLAG) {
@@ -2583,6 +2511,10 @@ class NativePlayer extends PlatformPlayer {
           'ao': 'null',
         'subs-fallback': 'yes',
         'subs-with-matching-audio': 'yes',
+        // Note: sub-create-cc-track (surfacing CEA-608/708 closed captions as
+        // a selectable track) was tried and reverted — mpv eagerly creates a
+        // phantom cc track per HLS video variant, polluting the track menu of
+        // every stream that carries no captions at all.
       };
       // Other properties based on [PlayerConfiguration].
       properties.addAll(
@@ -2599,6 +2531,11 @@ class NativePlayer extends PlatformPlayer {
             'seg_max_retry=5',
             'strict=experimental',
             'allowed_extensions=ALL',
+            // ffmpeg >= 7.1 additionally gates HLS segments on a hard-coded
+            // extension list (allowed_segment_extensions); without disabling
+            // that, renditions with unconventional segment names are dropped.
+            // Older ffmpeg logs an unknown-option warning and moves on.
+            'extension_picky=0',
             'protocol_whitelist=[${configuration.protocolWhitelist.join(',')}]'
           ].join(','),
           'sub-ass': configuration.libass ? 'yes' : 'no',
@@ -2646,7 +2583,6 @@ class NativePlayer extends PlatformPlayer {
         'idle-active': generated.mpv_format.MPV_FORMAT_FLAG,
         'sub-text': generated.mpv_format.MPV_FORMAT_NODE,
         'secondary-sub-text': generated.mpv_format.MPV_FORMAT_NODE,
-        'seeking': generated.mpv_format.MPV_FORMAT_FLAG,
       }.forEach(
         (property, format) {
           final reply = property.hashCode;
@@ -2862,13 +2798,6 @@ class NativePlayer extends PlatformPlayer {
 
   /// Current loaded [Media] queue.
   List<Media> current = <Media>[];
-
-  /// Timer used to poll [sub-text] after seek completes.
-  /// Cancelled and rescheduled on every seek so rapid seeks don't stack.
-  Timer? _seekSubtitleTimer;
-
-  /// Whether mpv is currently seeking (tracks the [seeking] property).
-  bool _isSeeking = false;
 
   /// Currently observed properties through [observeProperty].
   final HashMap<String, Future<void> Function(String)> observedProperties =

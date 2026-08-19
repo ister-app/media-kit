@@ -85,19 +85,56 @@ class AndroidVideoController extends PlatformVideoController {
   ) {
     wid.addListener(widListener);
     videoParamsSubscription = player.stream.videoParams.listen(
-      (event) => lock.synchronized(() async {
+      (event) => _refreshSurfaceSize(fallback: event),
+    );
+  }
+
+  /// Pushes the video output's size to the native side (the `android.view.Surface`
+  /// mpv renders into).
+  ///
+  /// The size is read from `video-out-params` — the output size *after*
+  /// filters, rotation metadata and any `video-crop` — not from
+  /// `video-params` ([fallback], the decoded size), which knows nothing about
+  /// cropping: sizing the surface from it letterboxes a cropped video back
+  /// into the uncropped aspect. `video-out-params` sub-properties are also
+  /// observed (see [_observeVideoOutParams]) because a `video-crop` set after
+  /// the load emits no [VideoParams] event.
+  Future<void> _refreshSurfaceSize({VideoParams? fallback}) =>
+      lock.synchronized(() async {
+        int? dw, dh, rotate;
+        try {
+          dw = int.tryParse(await platform.getProperty(
+              'video-out-params/dw',
+              waitForInitialization: false));
+          dh = int.tryParse(await platform.getProperty(
+              'video-out-params/dh',
+              waitForInitialization: false));
+          rotate = int.tryParse(await platform.getProperty(
+              'video-out-params/rotate',
+              waitForInitialization: false));
+        } catch (_) {
+          // Unavailable property (no video yet) — fall through.
+        }
+        fallback ??= player.state.videoParams;
+        dw ??= fallback?.dw;
+        dh ??= fallback?.dh;
+        rotate ??= fallback?.rotate ?? 0;
+
         final int width;
         final int height;
-        if (event.rotate == 0 || event.rotate == 180) {
-          width = event.dw ?? 0;
-          height = event.dh ?? 0;
+        if (rotate == 0 || rotate == 180) {
+          width = dw ?? 0;
+          height = dh ?? 0;
         } else {
           // width & height are swapped for 90 or 270 degrees rotation.
-          width = event.dh ?? 0;
-          height = event.dw ?? 0;
+          width = dh ?? 0;
+          height = dw ?? 0;
         }
 
         final isZero = width == 0 || height == 0;
+        // The surface is only re-created on an actual size change: every
+        // resize also re-initializes --vo through [widListener] and seeks to
+        // the current position.
         final isSame = width == rect.value?.width.toInt() &&
             height == rect.value?.height.toInt();
         if (isZero || isSame) {
@@ -125,8 +162,25 @@ class AndroidVideoController extends PlatformVideoController {
         if (!waitUntilFirstFrameRenderedCompleter.isCompleted) {
           waitUntilFirstFrameRenderedCompleter.complete();
         }
-      }),
-    );
+      });
+
+  /// Properties observed for output-size changes that emit no [VideoParams]
+  /// event (e.g. setting `video-crop` during playback).
+  static const _observedOutParams = [
+    'video-out-params/dw',
+    'video-out-params/dh',
+  ];
+
+  Future<void> _observeVideoOutParams() async {
+    for (final property in _observedOutParams) {
+      await platform.observeProperty(
+        property,
+        (_) => _refreshSurfaceSize(),
+        // This runs during VideoController creation; waiting on the video
+        // controller's own initialization would deadlock.
+        waitForInitialization: false,
+      );
+    }
   }
 
   /// {@macro android_video_controller}
@@ -207,6 +261,8 @@ class AndroidVideoController extends PlatformVideoController {
       },
     );
 
+    await controller._observeVideoOutParams();
+
     // Return the [PlatformVideoController].
     return controller;
   }
@@ -233,6 +289,14 @@ class AndroidVideoController extends PlatformVideoController {
     wid.dispose();
     wid.removeListener(widListener);
     await videoParamsSubscription?.cancel();
+    for (final property in _observedOutParams) {
+      try {
+        await platform.unobserveProperty(property,
+            waitForInitialization: false);
+      } catch (_) {
+        // Player may already be disposed; unobserving is best-effort.
+      }
+    }
     final handle = await player.handle;
     _controllers.remove(handle);
     await _channel.invokeMethod(

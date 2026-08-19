@@ -73,8 +73,40 @@ class NativeVideoController extends PlatformVideoController {
   )   : width = configuration.width,
         height = configuration.height {
     videoParamsSubscription = player.stream.videoParams.listen(
-      (event) => lock.synchronized(() async {
-        if ([0, null].contains(event.dw) || [0, null].contains(event.dh)) {
+      (event) => _refreshVideoOutputSize(fallback: event),
+    );
+  }
+
+  /// Pushes the video output's size to the native side.
+  ///
+  /// The size is read from `video-out-params` — the output size *after*
+  /// filters, rotation metadata and any `video-crop` — not from
+  /// `video-params` ([fallback], the decoded size), which knows nothing about
+  /// cropping: sizing the texture from it letterboxes a cropped video back
+  /// into the uncropped aspect. `video-out-params` sub-properties are also
+  /// observed (see [_observeVideoOutParams]) because a `video-crop` set after
+  /// the load emits no [VideoParams] event.
+  Future<void> _refreshVideoOutputSize({VideoParams? fallback}) =>
+      lock.synchronized(() async {
+        int? dw, dh, rotate;
+        try {
+          dw = int.tryParse(await platform.getProperty(
+              'video-out-params/dw',
+              waitForInitialization: false));
+          dh = int.tryParse(await platform.getProperty(
+              'video-out-params/dh',
+              waitForInitialization: false));
+          rotate = int.tryParse(await platform.getProperty(
+              'video-out-params/rotate',
+              waitForInitialization: false));
+        } catch (_) {
+          // Unavailable property (no video yet) — fall through.
+        }
+        fallback ??= player.state.videoParams;
+        dw ??= fallback?.dw;
+        dh ??= fallback?.dh;
+        rotate ??= fallback?.rotate ?? 0;
+        if ([0, null].contains(dw) || [0, null].contains(dh)) {
           return;
         }
 
@@ -82,13 +114,13 @@ class NativeVideoController extends PlatformVideoController {
 
         final int width;
         final int height;
-        if (event.rotate == 0 || event.rotate == 180) {
-          width = event.dw ?? 0;
-          height = event.dh ?? 0;
+        if (rotate == 0 || rotate == 180) {
+          width = dw!;
+          height = dh!;
         } else {
           // width & height are swapped for 90 or 270 degrees rotation.
-          width = event.dh ?? 0;
-          height = event.dw ?? 0;
+          width = dh!;
+          height = dw!;
         }
 
         if (videoParamsWidth == width && videoParamsHeight == height) {
@@ -106,8 +138,25 @@ class NativeVideoController extends PlatformVideoController {
             'height': height.toString(),
           },
         );
-      }),
-    );
+      });
+
+  /// Properties observed for output-size changes that emit no [VideoParams]
+  /// event (e.g. setting `video-crop` during playback).
+  static const _observedOutParams = [
+    'video-out-params/dw',
+    'video-out-params/dh',
+  ];
+
+  Future<void> _observeVideoOutParams() async {
+    for (final property in _observedOutParams) {
+      await platform.observeProperty(
+        property,
+        (_) => _refreshVideoOutputSize(),
+        // This runs during VideoController creation; waiting on the video
+        // controller's own initialization would deadlock.
+        waitForInitialization: false,
+      );
+    }
   }
 
   /// {@macro native_video_controller}
@@ -160,6 +209,8 @@ class NativeVideoController extends PlatformVideoController {
         'vid': 'auto',
       },
     );
+
+    await controller._observeVideoOutParams();
 
     // Wait until first texture ID is received.
     // We are not waiting on the native-side itself because it will block the UI thread.
@@ -239,6 +290,14 @@ class NativeVideoController extends PlatformVideoController {
   Future<void> _dispose() async {
     super.dispose();
     await videoParamsSubscription?.cancel();
+    for (final property in _observedOutParams) {
+      try {
+        await platform.unobserveProperty(property,
+            waitForInitialization: false);
+      } catch (_) {
+        // Player may already be disposed; unobserving is best-effort.
+      }
+    }
     final handle = await player.handle;
     _controllers.remove(handle);
     await _channel.invokeMethod(

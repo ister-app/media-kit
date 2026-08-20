@@ -89,11 +89,17 @@ class NativeVideoController extends PlatformVideoController {
   /// no [VideoParams] event.
   Future<void> _refreshVideoOutputSize({VideoParams? fallback}) =>
       lock.synchronized(() async {
-        var (dw, dh, rotate) = await _readVideoOutParams();
-        fallback ??= player.state.videoParams;
-        dw ??= fallback?.dw;
-        dh ??= fallback?.dh;
-        rotate ??= fallback?.rotate ?? 0;
+        final (outParams, mayFallBack) = await _readVideoOutParams();
+        if (outParams == null && !mayFallBack) return;
+        int? dw, dh, rotate;
+        if (outParams != null) {
+          (dw, dh, rotate) = outParams;
+        } else {
+          fallback ??= player.state.videoParams;
+          dw = fallback?.dw;
+          dh = fallback?.dh;
+          rotate = fallback?.rotate ?? 0;
+        }
         if ([0, null].contains(dw) || [0, null].contains(dh)) {
           return;
         }
@@ -137,21 +143,47 @@ class NativeVideoController extends PlatformVideoController {
   /// (a 960x1080 surface for a 960x540 video). Every such bogus size triggers
   /// a surface resize, which re-initializes the video output, which produces
   /// new parameters — an endless resize loop that never renders a frame.
-  Future<(int?, int?, int?)> _readVideoOutParams() async {
+  /// The output size to give the video output, or null to leave it alone.
+  ///
+  /// Returns `(null, true)` while the size is simply not known yet, so the
+  /// caller can fall back to [VideoParams]; `(null, false)` when the video
+  /// output is busy showing something that is not our video.
+  Future<((int, int, int)?, bool)> _readVideoOutParams() async {
     try {
-      final raw = await platform.getProperty(
-        'video-out-params',
-        waitForInitialization: false,
-      );
-      if (raw.isEmpty) return (null, null, null);
-      final map = json.decode(raw);
-      if (map is! Map) return (null, null, null);
-      int? asInt(Object? v) => v is num ? v.toInt() : null;
-      return (asInt(map['dw']), asInt(map['dh']), asInt(map['rotate']));
+      final decoded = await _readParams('video-params');
+      // Nothing is decoding: all mpv can report is the --force-window
+      // placeholder, so there is no size worth pushing.
+      if (decoded == null) return (null, false);
+      final out = await _readParams('video-out-params');
+      if (out == null) return (null, true);
+      // The video output also renders mpv's --force-window placeholder (a
+      // 960x540 rgba frame) whenever nothing is on screen — including the
+      // moment our own resize re-initializes --vo — and reports *that* through
+      // `video-out-params`. It describes our video only when the coded
+      // dimensions match; a crop changes dw/dh, never w/h. Falling back to
+      // [VideoParams] here would push the *uncropped* size and bounce the
+      // surface between the two forever.
+      if (out['w'] != decoded['w'] || out['h'] != decoded['h']) {
+        return (null, false);
+      }
+      int asInt(Object? v) => v is num ? v.toInt() : 0;
+      return ((asInt(out['dw']), asInt(out['dh']), asInt(out['rotate'])), false);
     } catch (_) {
-      // Unavailable or unparsable (no video yet) — fall back to [VideoParams].
-      return (null, null, null);
+      return (null, true);
     }
+  }
+
+  /// Reads one of mpv's `*-params` node properties, which it answers as JSON.
+  /// Null when the property is empty, which is what it reports while nothing
+  /// is decoding.
+  Future<Map?> _readParams(String property) async {
+    final raw = await platform.getProperty(
+      property,
+      waitForInitialization: false,
+    );
+    if (raw.isEmpty) return null;
+    final map = json.decode(raw);
+    return map is Map && map['w'] is num && (map['w'] as num) > 0 ? map : null;
   }
 
   /// Property observed for output-size changes that emit no [VideoParams]

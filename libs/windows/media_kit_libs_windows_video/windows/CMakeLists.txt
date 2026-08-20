@@ -68,11 +68,11 @@ endfunction()
 if(${FLUTTER_TARGET_PLATFORM} STREQUAL "windows-x64")
   set(LIBMPV_ARCH "x86_64")
   set(LIBMPV "mpv-dev-x86_64-20260820-git-41f6a64.7z")
-  set(LIBMPV_MD5 "847dd95bab2bdc1617b240cf24508d2f")
+  set(LIBMPV_MD5 "f498168cc444c8f28165c788f0172568")
 else()
   set(LIBMPV_ARCH "aarch64")
   set(LIBMPV "mpv-dev-aarch64-20260820-git-41f6a64.7z")
-  set(LIBMPV_MD5 "1b025d90fbede2294a702a826cf5c181")
+  set(LIBMPV_MD5 "d161e3878bf13e48a9f78230408294f3")
 endif()
 
 # Download URL for the libmpv archive from the latest release

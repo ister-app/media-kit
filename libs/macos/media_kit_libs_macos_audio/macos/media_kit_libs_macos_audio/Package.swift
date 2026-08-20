@@ -4,30 +4,42 @@
 import PackageDescription
 
 let libmpvTargets = [
+    "Ass",
     "Avcodec",
     "Avfilter",
     "Avformat",
     "Avutil",
+    "Freetype",
+    "Fribidi",
+    "Harfbuzz",
     "Mbedcrypto",
     "Mbedtls",
     "Mbedx509",
     "Mpv",
+    "Placebo",
+    "Png16",
     "Swresample",
     "Swscale"
 ]
 
-let libmpvArtifactBase = "https://github.com/media-kit/libmpv-darwin-build/releases/download/v0.7.2/libmpv-xcframeworks_v0.7.2_macos-universal-audio-full"
+let libmpvArtifactBase = "https://github.com/ister-app/libmpv-darwin-build/releases/download/v0.8.0/libmpv-xcframeworks_v0.8.0_macos-universal-audio-full"
 let libmpvChecksums = [
-    "Avcodec": "3019da15c5b7767d7dc4d70edc86de467cb74ca2cd3a8194db5049fa5dd9ba01",
-    "Avfilter": "fcfcc281e003177e72d521b8a297ab7205e238bbeaa03309ed0fc1293a5e54bc",
-    "Avformat": "cbce6959c1c3c05d44f7895bd0ead6e23d79cb207f76d007578e8bee5fe19208",
-    "Avutil": "7fff02e8c7fe945cad51e9994364ea38e31d3085e3c9395fc1b56dd75fd4c1e0",
-    "Mbedcrypto": "a9747876764cc95d7a222191bb04c9e89dca23d582664e4ada3cdb83c112ab37",
-    "Mbedtls": "fad60234122c4e6c78d52b31a9790a33dbf124a7ba30174c7570dab13b390b77",
-    "Mbedx509": "2246704fbaa1a1c13f357303016cc4c719e597a93380b091e46e977ec0134341",
-    "Mpv": "14a370ac4f1c9e3da4809ad0e9c400aed65773daf8907325e98fd773294edb9d",
-    "Swresample": "c862de2cd5975a87f86119845cbc6cb89db58bb8918f607d8f81dfbc4dd87caf",
-    "Swscale": "4aa0ad799043458cfc07742b39146ecefda27516bf8af0b52de405abdaf2ddd0"
+    "Ass": "d1f86724b3581389388d8e4be791b1254fd6feaee0f3f602622d566dc7a1b307",
+    "Avcodec": "418a1eb0c25474e5369d99e06296d286e695e6da19e964e482cda06ba7d342d5",
+    "Avfilter": "7bcd93f00c81eca02d618692f910515d80b9ef28925436c62e04c1c3398261b5",
+    "Avformat": "1c7e49d9798ec6f22455c9c21dd212c37fe12838069619db8665dc6d5b6fcd05",
+    "Avutil": "554190cf19f3049b3ada516615c0b3d3a4c3cf83539224641f9480a0d09f00c5",
+    "Freetype": "3cd29f75c57eb48be2d18fd78460aba58d25fcf2679119790650c0d042dcac0e",
+    "Fribidi": "6034fa4bf040e6da2ccc9f267371df4d663869ec77181d3172ea44616a7def1d",
+    "Harfbuzz": "da26f7cdb52b662e54065cf9910cb3d81641ca706f4a2212daccfde34fbdc961",
+    "Mbedcrypto": "0c6931a4cf674eb83ab7f460beccab2d2000e7695f372935b039aff7b217f2eb",
+    "Mbedtls": "71f82da99a3e9faf56f6b5c9c7dddc920631b20123371af4b6e6e0f4dcef8282",
+    "Mbedx509": "1307aae500ff6edd03b2faf648e10a52ca90b38fa218e49e2d7db15e71810d21",
+    "Mpv": "edba66c2e7464c9a65367b19ff2e54a457563142f9b181a3f34fc186d1079daf",
+    "Placebo": "f95893cbb55e9b82da88b4cb787aba408a02e814dd59990237ac2c1dcee88109",
+    "Png16": "d38b1f8f68ff0ef6cba71c39aa9208eebbd44d67f4043e8ffb0e4f2de532d284",
+    "Swresample": "93849679dce740b7101d972f1cd0b3adcc2d387e88c2198935cb9a48d67bdc34",
+    "Swscale": "f9ee305594c348dfdba7cdf7e4b860deaff19032e2af5e7fe0de936d71c71594"
 ]
 
 let package = Package(

@@ -6,6 +6,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a monorepo for **media_kit**, a cross-platform audio/video player library for Flutter/Dart, built on top of **libmpv**. It uses [Melos](https://melos.invertase.dev/) for workspace management.
 
+## This is a fork
+
+`ister-app/media-kit` is the fork the Ister player pins, by commit sha, in its `pubspec.yaml`
+(`media_kit`, `media_kit_video`, `media_kit_libs_*`) and `pubspec.lock`. Changing anything here
+means: commit, push, then re-pin the sha in the player and run `flutter pub get` twice — the
+pub-cache git mirror can otherwise serve a stale checkout.
+
+### Divergences worth knowing
+
+- **`libs/*` point at `ister-app` builds of libmpv**, not media-kit's:
+  `libmpv-darwin-build` (macOS/iOS, tag `vX.Y.Z`), `libmpv-android-video-build` (jars by md5) and
+  `libmpv-win32-video-cmake` (`mpv-dev-*.7z` by md5). Each of those repos has its own CLAUDE.md.
+  They ship **mpv 0.41.0 with ffmpeg 9.0.1**; upstream media-kit is still on mpv 0.36, which
+  predates `--video-crop`.
+- Since mpv 0.41 links libplacebo and libass unconditionally, the darwin `Package.swift` files
+  list extra binary targets (`Placebo`, and the libass font stack in the *audio* variants too).
+  Forgetting one is a link error, not a runtime one.
+- `media_kit_video`'s video controllers size the output from **`video-out-params`**, not
+  `video-params`, so a server-set `video-crop` reaches the texture/surface. See below.
+
+### Rules the video controllers depend on
+
+- **Never do real work inside an `observeProperty` listener.** `NativePlayer` awaits those
+  callbacks *inside* libmpv's single-threaded event pump; blocking there stalls every further mpv
+  event, and anything waiting on a player command (which needs the pump) deadlocks. Schedule the
+  work and return.
+- **Read `*-params` as one snapshot.** mpv answers a single `video-out-params` read with the whole
+  node as JSON. Fetching `video-out-params/dw` and `/dh` separately tears: mpv updates between the
+  two reads, and the pair describes a size that never existed (a 960x1080 surface for a 960x540
+  video), which then triggers an endless resize loop.
+- **`video-out-params` is not always about your video.** With `--force-window` (the Android
+  controller sets it) mpv keeps a 960x540 rgba placeholder around whenever nothing is on screen —
+  including while your own resize re-initializes `--vo`. It describes the video only when its
+  coded `w`/`h` match `video-params`; a crop changes `dw`/`dh`, never `w`/`h`. When they differ,
+  keep the current size: falling back to `video-params` there pushes the *uncropped* size and
+  bounces the surface between the two forever.
+- Every surface resize re-initializes `--vo` and, with it, the decoder. Treat a resize as
+  expensive and only do it on a real, verified size change.
+
 ## Package Structure
 
 - **`media_kit/`** — Core player library (pure Dart + FFI). The primary package most changes will touch.

@@ -58,10 +58,10 @@ task downloadDependencies(type: Exec) {
 
         // Download all *.jar dependencies & verify their MD5 checksums.
         def filesToDownload = [
-            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.0/default-arm64-v8a.jar", "md5": "b2216dd26e03270d0aaddb81a4dd5e33", "destination": file("$buildDir/v1.2.0/default-arm64-v8a.jar")],
-            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.0/default-armeabi-v7a.jar", "md5": "848c48160672e0d5e1a7b6f5119b3a55", "destination": file("$buildDir/v1.2.0/default-armeabi-v7a.jar")],
-            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.0/default-x86_64.jar", "md5": "df66fcacbf9776f72cf874bfa4efbf2c", "destination": file("$buildDir/v1.2.0/default-x86_64.jar")],
-            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.0/default-x86.jar", "md5": "279f787af920b22296a8b1a68c30cc6a", "destination": file("$buildDir/v1.2.0/default-x86.jar")]
+            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-arm64-v8a.jar", "md5": "3a192ccf1fef897a746683a99b46fae8", "destination": file("$buildDir/v1.2.1/default-arm64-v8a.jar")],
+            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-armeabi-v7a.jar", "md5": "93e4598d8184d895826ffc21a022eb6f", "destination": file("$buildDir/v1.2.1/default-armeabi-v7a.jar")],
+            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-x86_64.jar", "md5": "99d730328775c768b334647886319d8a", "destination": file("$buildDir/v1.2.1/default-x86_64.jar")],
+            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-x86.jar", "md5": "4cfca3677932ed5293383729ad8f26f0", "destination": file("$buildDir/v1.2.1/default-x86.jar")]
         ]
 
         filesToDownload.each { fileInfo ->

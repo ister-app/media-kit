@@ -5,6 +5,7 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
 import 'dart:collection';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
@@ -83,25 +84,12 @@ class NativeVideoController extends PlatformVideoController {
   /// filters, rotation metadata and any `video-crop` — not from
   /// `video-params` ([fallback], the decoded size), which knows nothing about
   /// cropping: sizing the texture from it letterboxes a cropped video back
-  /// into the uncropped aspect. `video-out-params` sub-properties are also
-  /// observed (see [_observeVideoOutParams]) because a `video-crop` set after
-  /// the load emits no [VideoParams] event.
+  /// into the uncropped aspect. `video-out-params` is also observed (see
+  /// [_observeVideoOutParams]) because a `video-crop` set after the load emits
+  /// no [VideoParams] event.
   Future<void> _refreshVideoOutputSize({VideoParams? fallback}) =>
       lock.synchronized(() async {
-        int? dw, dh, rotate;
-        try {
-          dw = int.tryParse(await platform.getProperty(
-              'video-out-params/dw',
-              waitForInitialization: false));
-          dh = int.tryParse(await platform.getProperty(
-              'video-out-params/dh',
-              waitForInitialization: false));
-          rotate = int.tryParse(await platform.getProperty(
-              'video-out-params/rotate',
-              waitForInitialization: false));
-        } catch (_) {
-          // Unavailable property (no video yet) — fall through.
-        }
+        var (dw, dh, rotate) = await _readVideoOutParams();
         fallback ??= player.state.videoParams;
         dw ??= fallback?.dw;
         dh ??= fallback?.dh;
@@ -140,12 +128,35 @@ class NativeVideoController extends PlatformVideoController {
         );
       });
 
-  /// Properties observed for output-size changes that emit no [VideoParams]
+
+  /// Reads `dw`/`dh`/`rotate` from `video-out-params` in a *single* property
+  /// fetch, which mpv answers with the whole node as JSON.
+  ///
+  /// Fetching `video-out-params/dw` and `/dh` separately can tear: mpv may
+  /// update between the two reads, which yields a size that never existed
+  /// (a 960x1080 surface for a 960x540 video). Every such bogus size triggers
+  /// a surface resize, which re-initializes the video output, which produces
+  /// new parameters — an endless resize loop that never renders a frame.
+  Future<(int?, int?, int?)> _readVideoOutParams() async {
+    try {
+      final raw = await platform.getProperty(
+        'video-out-params',
+        waitForInitialization: false,
+      );
+      if (raw.isEmpty) return (null, null, null);
+      final map = json.decode(raw);
+      if (map is! Map) return (null, null, null);
+      int? asInt(Object? v) => v is num ? v.toInt() : null;
+      return (asInt(map['dw']), asInt(map['dh']), asInt(map['rotate']));
+    } catch (_) {
+      // Unavailable or unparsable (no video yet) — fall back to [VideoParams].
+      return (null, null, null);
+    }
+  }
+
+  /// Property observed for output-size changes that emit no [VideoParams]
   /// event (e.g. setting `video-crop` during playback).
-  static const _observedOutParams = [
-    'video-out-params/dw',
-    'video-out-params/dh',
-  ];
+  static const _observedOutParams = ['video-out-params'];
 
   Future<void> _observeVideoOutParams() async {
     for (final property in _observedOutParams) {

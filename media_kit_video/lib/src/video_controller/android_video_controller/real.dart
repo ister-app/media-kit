@@ -175,7 +175,13 @@ class AndroidVideoController extends PlatformVideoController {
     for (final property in _observedOutParams) {
       await platform.observeProperty(
         property,
-        (_) => _refreshSurfaceSize(),
+        // The listener is awaited *inside* libmpv's event pump, which
+        // processes one event at a time. Refreshing here would block every
+        // further mpv event for as long as [_refreshSurfaceSize] waits on
+        // [lock] — and [widListener] holds that lock while it awaits player
+        // commands that only complete once the pump runs again. Schedule the
+        // refresh and return immediately instead.
+        (_) async => unawaited(_refreshSurfaceSize()),
         // This runs during VideoController creation; waiting on the video
         // controller's own initialization would deadlock.
         waitForInitialization: false,

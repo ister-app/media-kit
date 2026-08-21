@@ -1,6 +1,6 @@
 all: Frameworks/*.xcframework Frameworks/.symlinks
 
-MPV_XCFRAMEWORKS_VERSION=v0.8.1
+MPV_XCFRAMEWORKS_VERSION=v0.8.2
 MPV_XCFRAMEWORKS_SHA256SUM=a0dbcddc0eaefa5534eb2bdc797e5386b1e0cd4057ed8f73aa2dd6105503dffb
 
 TAR=tar

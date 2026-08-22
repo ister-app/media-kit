@@ -31,6 +31,31 @@ class AndroidVideoController extends PlatformVideoController {
   /// Pointer address to the global object reference of `android.view.Surface` i.e. `(intptr_t)(*android.view.Surface)`.
   final ValueNotifier<int?> wid = ValueNotifier<int?>(null);
 
+  /// Whether the SurfaceView output currently drives rendering. Constant when
+  /// [VideoControllerConfiguration.androidSurfaceView] is plainly on or off;
+  /// toggled by fullscreen enter/exit in the fullscreen-only (dual) mode.
+  final ValueNotifier<bool> surfaceViewActive = ValueNotifier<bool>(false);
+
+  /// Last known texture output (id + surface pointer), kept while the
+  /// SurfaceView output is active so switching back is immediate.
+  int? _textureId;
+  int _textureWid = 0;
+
+  /// Last known SurfaceView output surface pointer.
+  int _surfaceViewWid = 0;
+
+  /// `--vo` for the currently active output; overrides [configuration.vo]
+  /// after a runtime mode switch (that field is immutable).
+  String? _voOverride;
+
+  bool get _dualMode =>
+      configuration.androidSurfaceView &&
+      configuration.androidSurfaceViewFullscreenOnly;
+
+  /// The texture id to render when the texture output is active. [id] itself
+  /// is `-1` while the SurfaceView output drives rendering.
+  int? get textureId => _textureId;
+
   /// [Lock] used to synchronize [onLoadHooks], [onUnloadHooks] & [subscription].
   final lock = Lock();
 
@@ -54,7 +79,7 @@ class AndroidVideoController extends PlatformVideoController {
       final androidSurfaceSizeValue = [width, height].join('x');
       final widValue = wid.value?.toString() ?? '0';
       // When --wid is 0, vo=null is required to avoid SIGSEGV.
-      final voValue = widValue == '0' ? 'null' : configuration.vo!;
+      final voValue = widValue == '0' ? 'null' : (_voOverride ?? configuration.vo!);
       final vidValue = widValue == '0' ? 'no' : 'auto';
       // It is important to re-initialize --vo after --android-surface-size.
       await setProperty('vo', 'null');
@@ -74,6 +99,56 @@ class AndroidVideoController extends PlatformVideoController {
       final currentPosition = player.state.position;
       await player.seek(currentPosition);
     });
+  }
+
+  /// mpv properties for the texture (GL, tone-mapped) output.
+  static const _textureModeProperties = {
+    'opengl-es': 'yes',
+    'gpu-context': 'android',
+    'target-colorspace-hint': 'no',
+  };
+
+  /// mpv properties for the SurfaceView (Vulkan, HDR passthrough) output.
+  /// `opengl-es` is left untouched: it only affects GL context creation,
+  /// which this mode does not use.
+  static const _surfaceViewModeProperties = {
+    'gpu-context': 'androidvk',
+    'target-colorspace-hint': 'yes',
+  };
+
+  /// Fullscreen hook for the dual (fullscreen-only) mode: switches mpv
+  /// between the texture output (embedded, tone-mapped SDR) and the
+  /// SurfaceView output (fullscreen, HDR passthrough). No-op otherwise.
+  Future<void> onFullscreenChanged(bool fullscreen) async {
+    if (!_dualMode) return;
+    if (surfaceViewActive.value == fullscreen) return;
+    surfaceViewActive.value = fullscreen;
+    // Detach mpv from the old surface before re-configuring: the properties
+    // below change the GPU context, which only takes effect on vo re-init.
+    await lock.synchronized(() async {
+      await setProperty('vo', 'null');
+      // configuration.hwdec is the emulator-aware texture-path default; the
+      // SurfaceView path needs the copy-back decoder (see create).
+      final baseHwdec = configuration.hwdec!;
+      await setProperties({
+        'hwdec': fullscreen
+            ? (baseHwdec == 'no' ? 'no' : 'mediacodec-copy')
+            : baseHwdec,
+        ...(fullscreen ? _surfaceViewModeProperties : _textureModeProperties),
+      });
+      _voOverride = fullscreen ? 'gpu-next' : 'gpu';
+    });
+    // Hand the stored surface of the target output to mpv. On the first
+    // fullscreen entry the SurfaceView surface does not exist yet (0) — its
+    // platform view mounts right after this and delivers the wid through
+    // VideoOutput.Resize.
+    if (fullscreen) {
+      id.value = -1;
+      wid.value = _surfaceViewWid;
+    } else {
+      id.value = _textureId;
+      wid.value = _textureWid;
+    }
   }
 
   /// [StreamSubscription] for listening to video [Rect].
@@ -232,6 +307,45 @@ class AndroidVideoController extends PlatformVideoController {
     }
   }
 
+  /// Whether `container-fps` is being observed (SurfaceView mode only).
+  bool _observingContainerFps = false;
+
+  /// Last frame rate pushed to the platform side, to dedupe the property
+  /// observer's re-emissions (every --vo re-init re-reports the same value).
+  double? _lastPushedFps;
+
+  /// Observes the content frame rate and forwards it to the SurfaceView's
+  /// `Surface.setFrameRate`, so Android can switch the display to a matching
+  /// refresh rate (e.g. 23.976 Hz for film content).
+  Future<void> _observeContainerFps() async {
+    _observingContainerFps = true;
+    await platform.observeProperty(
+      'container-fps',
+      // Do not await inside libmpv's event pump — see [_observeVideoOutParams].
+      (value) async => unawaited(_pushFrameRate(value)),
+      waitForInitialization: false,
+    );
+  }
+
+  Future<void> _pushFrameRate(String value) async {
+    final parsed = double.tryParse(value) ?? 0.0;
+    final fps = parsed.isFinite && parsed > 0 ? parsed : 0.0;
+    if (fps == _lastPushedFps) return;
+    _lastPushedFps = fps;
+    try {
+      final handle = await player.handle;
+      await _channel.invokeMethod(
+        'VideoOutputManager.SetFrameRate',
+        {
+          'handle': handle.toString(),
+          'fps': fps.toString(),
+        },
+      );
+    } catch (exception) {
+      debugPrint(exception.toString());
+    }
+  }
+
   /// {@macro android_video_controller}
   static Future<PlatformVideoController> create(
     Player player,
@@ -249,10 +363,29 @@ class AndroidVideoController extends PlatformVideoController {
       return hw ? 'auto-safe' : 'no';
     }
 
+    // In the fullscreen-only (dual) mode playback starts on the texture path;
+    // fullscreen enter/exit switches outputs at runtime.
+    final startInSurfaceView = configuration.androidSurfaceView &&
+        !configuration.androidSurfaceViewFullscreenOnly;
+
     // Update [configuration] to have default values.
+    //
+    // The SurfaceView path renders through vo=gpu-next on a Vulkan context:
+    // --target-colorspace-hint (HDR passthrough) only exists on gpu-next, and
+    // only libplacebo's Vulkan swapchain implements it — the GL swapchain
+    // ignores the hint entirely.
     configuration = configuration.copyWith(
-      vo: configuration.vo ?? 'gpu',
-      hwdec: configuration.hwdec ?? await getDefaultHwdec(),
+      vo: configuration.vo ?? (startInSurfaceView ? 'gpu-next' : 'gpu'),
+      hwdec: configuration.hwdec ??
+          (startInSurfaceView
+              // The direct mediacodec interop (hwdec_aimagereader) is GL-only;
+              // on the Vulkan context used by the SurfaceView path only the
+              // copy-back variant works — hardware decode into system memory,
+              // Vulkan upload.
+              ? (configuration.enableHardwareAcceleration
+                  ? 'mediacodec-copy'
+                  : 'no')
+              : await getDefaultHwdec()),
     );
 
     // Retrieve the native handle of the [Player].
@@ -287,12 +420,28 @@ class AndroidVideoController extends PlatformVideoController {
     // Store the [VideoController] in the [_controllers].
     _controllers[handle] = controller;
 
-    await _channel.invokeMethod(
-      'VideoOutputManager.Create',
-      {
-        'handle': handle.toString(),
-      },
-    );
+    controller.surfaceViewActive.value = startInSurfaceView;
+
+    // Dual mode registers *both* outputs: the texture output renders embedded
+    // playback, the SurfaceView output takes over in fullscreen.
+    if (!configuration.androidSurfaceView || controller._dualMode) {
+      await _channel.invokeMethod(
+        'VideoOutputManager.Create',
+        {
+          'handle': handle.toString(),
+          'surfaceView': false,
+        },
+      );
+    }
+    if (configuration.androidSurfaceView) {
+      await _channel.invokeMethod(
+        'VideoOutputManager.Create',
+        {
+          'handle': handle.toString(),
+          'surfaceView': true,
+        },
+      );
+    }
 
     await controller.setProperties(
       {
@@ -300,9 +449,10 @@ class AndroidVideoController extends PlatformVideoController {
         'vo': 'null',
         'hwdec': configuration.hwdec!,
         'vid': 'auto',
-        'opengl-es': 'yes',
+        ...(startInSurfaceView
+            ? _surfaceViewModeProperties
+            : _textureModeProperties),
         'force-window': 'yes',
-        'gpu-context': 'android',
         'sub-use-margins': 'no',
         'sub-font-provider': 'none',
         'sub-scale-with-window': 'yes',
@@ -311,6 +461,10 @@ class AndroidVideoController extends PlatformVideoController {
     );
 
     await controller._observeVideoOutParams();
+    if (configuration.androidSurfaceView &&
+        configuration.androidMatchContentFrameRate) {
+      await controller._observeContainerFps();
+    }
 
     // Return the [PlatformVideoController].
     return controller;
@@ -335,10 +489,14 @@ class AndroidVideoController extends PlatformVideoController {
   /// Disposes the instance. Releases allocated resources back to the system.
   Future<void> _dispose() async {
     super.dispose();
+    surfaceViewActive.dispose();
     wid.dispose();
     wid.removeListener(widListener);
     await videoParamsSubscription?.cancel();
-    for (final property in _observedOutParams) {
+    for (final property in [
+      ..._observedOutParams,
+      if (_observingContainerFps) 'container-fps',
+    ]) {
       try {
         await platform.unobserveProperty(property,
             waitForInitialization: false);
@@ -380,9 +538,23 @@ class AndroidVideoController extends PlatformVideoController {
                     );
                     final int id = call.arguments['id'];
                     final int wid = call.arguments['wid'];
-                    _controllers[handle]?.rect.value = rect;
-                    _controllers[handle]?.id.value = id;
-                    _controllers[handle]?.wid.value = wid;
+                    final controller = _controllers[handle];
+                    if (controller == null) break;
+                    // id == -1 marks the SurfaceView output. Both outputs
+                    // exist at once in dual mode: always store, but only the
+                    // active output may drive mpv (wid) and the widget.
+                    final bool fromSurfaceView = id == -1;
+                    if (fromSurfaceView) {
+                      controller._surfaceViewWid = wid;
+                    } else {
+                      controller._textureId = id;
+                      controller._textureWid = wid;
+                    }
+                    if (fromSurfaceView == controller.surfaceViewActive.value) {
+                      controller.rect.value = rect;
+                      controller.id.value = id;
+                      controller.wid.value = wid;
+                    }
                     break;
                   }
                 case 'VideoOutput.WaitUntilFirstFrameRenderedNotify':

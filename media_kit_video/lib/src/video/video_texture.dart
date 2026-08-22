@@ -5,8 +5,13 @@
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:io';
 import 'dart:async';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
+
+import 'package:media_kit_video/src/video_controller/android_video_controller/android_video_controller.dart';
 import 'package:media_kit_video/media_kit_video_controls/media_kit_video_controls.dart';
 
 import 'package:media_kit_video/src/subtitle/subtitle_view.dart';
@@ -369,6 +374,82 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   void refreshView() {}
 
+  bool _isSurfaceViewMode(PlatformVideoController controller) =>
+      !kIsWeb &&
+      controller is AndroidVideoController &&
+      controller.configuration.androidSurfaceView;
+
+  /// The active video output: [Texture], or the SurfaceView platform view
+  /// when that output drives rendering. In the fullscreen-only (dual) mode
+  /// the platform view is only built by the fullscreen [Video] instance —
+  /// the embedded instance keeps its (frozen) texture below the route, so no
+  /// second SurfaceView competes for the output.
+  Widget _videoOutput(
+    PlatformVideoController notifier,
+    int? id,
+    VideoViewParameters videoViewParameters,
+  ) {
+    Widget texture() => Texture(
+          textureId: (notifier is AndroidVideoController
+                  ? notifier.textureId
+                  : null) ??
+              id!,
+          filterQuality: videoViewParameters.filterQuality,
+        );
+    if (!_isSurfaceViewMode(notifier)) {
+      return texture();
+    }
+    final android = notifier as AndroidVideoController;
+    return ValueListenableBuilder<bool>(
+      valueListenable: android.surfaceViewActive,
+      builder: (context, active, _) {
+        // Per-instance check (not the state's isFullscreen(), whose context
+        // notifier follows the most recent instance): only the widget inside
+        // the fullscreen route may host the platform view.
+        final showSurfaceView = active &&
+            (!android.configuration.androidSurfaceViewFullscreenOnly ||
+                media_kit_video_controls.isFullscreen(context));
+        return showSurfaceView ? _buildSurfaceView(android) : texture();
+      },
+    );
+  }
+
+  /// The SurfaceView platform view used instead of [Texture] when
+  /// [VideoControllerConfiguration.androidSurfaceView] is set. SurfaceFlinger
+  /// composites the surface directly (HDR passthrough, Surface.setFrameRate);
+  /// hybrid composition is forced explicitly — SurfaceView cannot render
+  /// through the texture-based platform-view modes.
+  Widget _buildSurfaceView(PlatformVideoController controller) {
+    return FutureBuilder<int>(
+      future: controller.player.handle,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const SizedBox.shrink();
+        }
+        final handle = snapshot.data!;
+        return PlatformViewLink(
+          viewType: 'com.alexmercerind/media_kit_video/surface_view',
+          surfaceFactory: (context, controller) => AndroidViewSurface(
+            controller: controller as AndroidViewController,
+            // Touch input stays with the Flutter widgets layered on top.
+            gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
+            hitTestBehavior: PlatformViewHitTestBehavior.transparent,
+          ),
+          onCreatePlatformView: (params) =>
+              PlatformViewsService.initExpensiveAndroidView(
+            id: params.id,
+            viewType: params.viewType,
+            layoutDirection: TextDirection.ltr,
+            creationParams: <String, dynamic>{'handle': handle},
+            creationParamsCodec: const StandardMessageCodec(),
+          )
+                ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
+                ..create(),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return media_kit_video_controls.VideoStateInheritedWidget(
@@ -400,7 +481,13 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                 return ValueListenableBuilder<Rect?>(
                                   valueListenable: notifier.rect,
                                   builder: (context, rect, _) {
-                                    if (id != null &&
+                                    // SurfaceView mode has no texture id: the
+                                    // platform view itself produces the
+                                    // surface, so requiring an id first would
+                                    // deadlock (the id-carrying Resize event
+                                    // only fires once the view exists).
+                                    if ((id != null ||
+                                            _isSurfaceViewMode(notifier)) &&
                                         rect != null &&
                                         _visible) {
                                       return SizedBox(
@@ -417,11 +504,10 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                           children: [
                                             const SizedBox(),
                                             Positioned.fill(
-                                              child: Texture(
-                                                textureId: id,
-                                                filterQuality:
-                                                    videoViewParameters
-                                                        .filterQuality,
+                                              child: _videoOutput(
+                                                notifier,
+                                                id,
+                                                videoViewParameters,
                                               ),
                                             ),
                                             // Keep the |Texture| hidden before the first frame renders. In native implementation, if no default frame size is passed (through VideoController), a starting 1 pixel sized texture/surface is created to initialize the render context & check for H/W support.

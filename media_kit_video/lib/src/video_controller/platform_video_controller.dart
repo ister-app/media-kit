@@ -121,6 +121,34 @@ class VideoControllerConfiguration {
   /// * [vo] != gpu : `false`
   final bool? androidAttachSurfaceAfterVideoParameters;
 
+  /// Android only: render into a real `android.view.SurfaceView` (embedded as a
+  /// platform view) instead of a Flutter texture.
+  ///
+  /// SurfaceFlinger composites the SurfaceView directly, which enables HDR
+  /// passthrough (with `vo=gpu-next` on a Vulkan context) and display
+  /// frame-rate matching via `Surface.setFrameRate` — neither is possible when
+  /// the video is composited into Flutter's own (SDR, 8-bit) scene.
+  ///
+  /// Default: `false`
+  final bool androidSurfaceView;
+
+  /// Android only, requires [androidSurfaceView]: use the SurfaceView path
+  /// exclusively while a `Video` is in fullscreen, and the regular texture
+  /// path (tone-mapped SDR) for embedded playback. Embedded platform views in
+  /// a scrolling UI are a structural compromise (jank or overlay artifacts,
+  /// depending on the composition mode); fullscreen has neither, and is where
+  /// HDR viewing actually happens — the same trade-off native video apps make.
+  ///
+  /// Default: `false`
+  final bool androidSurfaceViewFullscreenOnly;
+
+  /// Android only, requires [androidSurfaceView]: forward the content frame
+  /// rate to `Surface.setFrameRate` so the display can switch to a matching
+  /// refresh rate (seamless switches only). No-op below API 30.
+  ///
+  /// Default: `false`
+  final bool androidMatchContentFrameRate;
+
   /// {@macro video_controller_configuration}
   const VideoControllerConfiguration({
     this.vo,
@@ -130,6 +158,9 @@ class VideoControllerConfiguration {
     this.scale = 1.0,
     this.enableHardwareAcceleration = true,
     this.androidAttachSurfaceAfterVideoParameters,
+    this.androidSurfaceView = false,
+    this.androidSurfaceViewFullscreenOnly = false,
+    this.androidMatchContentFrameRate = false,
   });
 
   /// Returns a copy of this class with the given fields replaced by the new values.
@@ -141,6 +172,9 @@ class VideoControllerConfiguration {
     int? height,
     bool? enableHardwareAcceleration,
     bool? androidAttachSurfaceAfterVideoParameters,
+    bool? androidSurfaceView,
+    bool? androidSurfaceViewFullscreenOnly,
+    bool? androidMatchContentFrameRate,
   }) =>
       VideoControllerConfiguration(
         vo: vo ?? this.vo,
@@ -153,5 +187,10 @@ class VideoControllerConfiguration {
         androidAttachSurfaceAfterVideoParameters:
             androidAttachSurfaceAfterVideoParameters ??
                 this.androidAttachSurfaceAfterVideoParameters,
+        androidSurfaceView: androidSurfaceView ?? this.androidSurfaceView,
+        androidSurfaceViewFullscreenOnly: androidSurfaceViewFullscreenOnly ??
+            this.androidSurfaceViewFullscreenOnly,
+        androidMatchContentFrameRate:
+            androidMatchContentFrameRate ?? this.androidMatchContentFrameRate,
       );
 }

@@ -17,6 +17,9 @@ class AndroidVideoController extends PlatformVideoController {
     super.configuration,
   );
 
+  /// See the native implementation; never reached on web.
+  Future<void> onFullscreenChanged(bool fullscreen) async {}
+
   static Future<PlatformVideoController> create(
     Player player,
     VideoControllerConfiguration configuration,

@@ -31,6 +31,9 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
 
         videoOutputManager = new VideoOutputManager(flutterPluginBinding.getTextureRegistry());
 
+        flutterPluginBinding
+                .getPlatformViewRegistry()
+                .registerViewFactory(SurfaceViewFactory.VIEW_TYPE, new SurfaceViewFactory(videoOutputManager));
     }
 
     @Override
@@ -38,7 +41,8 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
         switch (call.method) {
             case "VideoOutputManager.Create": {
                 final long handle = Long.parseLong(call.argument("handle"));
-                videoOutputManager.create(handle, (id, wid, width, height) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
+                final boolean surfaceView = Boolean.TRUE.equals(call.argument("surfaceView"));
+                final TextureUpdateCallback callback = (id, wid, width, height) -> channel.invokeMethod("VideoOutput.Resize", new HashMap<String, Object>() {{
                     put("handle", handle);
                     put("id", id);
                     put("wid", wid);
@@ -48,7 +52,19 @@ public class MediaKitVideoPlugin implements FlutterPlugin, MethodCallHandler {
                         put("width", width);
                         put("height", height);
                     }});
-                }}));
+                }});
+                if (surfaceView) {
+                    videoOutputManager.createSurfaceView(handle, callback);
+                } else {
+                    videoOutputManager.create(handle, callback);
+                }
+                result.success(null);
+                break;
+            }
+            case "VideoOutputManager.SetFrameRate": {
+                final long handle = Long.parseLong(call.argument("handle"));
+                final float fps = Float.parseFloat(call.argument("fps"));
+                videoOutputManager.setFrameRate(handle, fps);
                 result.success(null);
                 break;
             }

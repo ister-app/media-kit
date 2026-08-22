@@ -8,6 +8,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import 'package:media_kit_video/media_kit_video_controls/src/controls/methods/video_state.dart';
 import 'package:media_kit_video/media_kit_video_controls/src/controls/methods/fullscreen.dart';
+import 'package:media_kit_video/src/video_controller/android_video_controller/android_video_controller.dart';
 import 'fullscreen_listener_stub.dart'
     if (dart.library.js_interop) 'fullscreen_listener_web.dart';
 
@@ -64,9 +65,21 @@ class _FullscreenInheritedWidgetPopScopeState
     extends State<_FullscreenInheritedWidgetPopScope> {
   VoidCallback? _cancelFullscreenListener;
 
+  /// Captured in [initState]: ancestor lookups are not allowed in [dispose],
+  /// but the fullscreen-exit side of the dual-output switch happens there —
+  /// it is the one place every exit path (button, back gesture) passes.
+  AndroidVideoController? _androidVideoController;
+
   @override
   void initState() {
     super.initState();
+    final inherited =
+        context.getInheritedWidgetOfExactType<FullscreenInheritedWidget>();
+    final platform = inherited?.parent.widget.controller.notifier.value;
+    if (platform is AndroidVideoController) {
+      _androidVideoController = platform;
+      platform.onFullscreenChanged(true);
+    }
     // On web, pressing Escape exits browser native fullscreen but does not
     // pop the Flutter route. Listen for the fullscreenchange event and call
     // exitFullscreen so the route is popped in sync with the browser state.
@@ -81,6 +94,7 @@ class _FullscreenInheritedWidgetPopScopeState
 
   @override
   void dispose() {
+    _androidVideoController?.onFullscreenChanged(false);
     _cancelFullscreenListener?.call();
     super.dispose();
   }

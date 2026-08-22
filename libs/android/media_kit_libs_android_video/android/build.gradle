@@ -57,9 +57,11 @@ task downloadDependencies(type: Exec) {
         outputDir.mkdirs()
 
         // Download all *.jar dependencies & verify their MD5 checksums.
+        // TODO(hdr-spike): arm64 points at the local Vulkan spike build —
+        // replace with the released URL + md5 before pinning this fork.
         def filesToDownload = [
-            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-arm64-v8a.jar", "md5": "3a192ccf1fef897a746683a99b46fae8", "destination": file("$buildDir/v1.2.1/default-arm64-v8a.jar")],
-            ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-armeabi-v7a.jar", "md5": "93e4598d8184d895826ffc21a022eb6f", "destination": file("$buildDir/v1.2.1/default-armeabi-v7a.jar")],
+            ["url": "file:///home/gerben/Projecten/libmpv-android-video-build/buildscripts/artifacts/default/default-arm64-v8a-vulkan.jar", "md5": "28dbb7a828fb0e806bbf64f1ad24f636", "destination": file("$buildDir/v1.2.1/default-arm64-v8a.jar")],
+            ["url": "file:///home/gerben/Projecten/libmpv-android-video-build/buildscripts/artifacts/default/default-armeabi-v7a-vulkan.jar", "md5": "31a23a18939dece159047d2e82a83704", "destination": file("$buildDir/v1.2.1/default-armeabi-v7a.jar")],
             ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-x86_64.jar", "md5": "99d730328775c768b334647886319d8a", "destination": file("$buildDir/v1.2.1/default-x86_64.jar")],
             ["url": "https://github.com/ister-app/libmpv-android-video-build/releases/download/v1.2.1/default-x86.jar", "md5": "4cfca3677932ed5293383729ad8f26f0", "destination": file("$buildDir/v1.2.1/default-x86.jar")]
         ]

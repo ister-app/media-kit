@@ -82,6 +82,20 @@ class WebPlayer extends PlatformPlayer {
         });
       });
       element.onPause.listen((_) {
+        // The HTML spec pauses a media element that is removed from the
+        // document ("removing steps": await a stable state, then pause if it
+        // is still not in a document). Flutter's HtmlElementView removes and
+        // re-inserts this element on every platform-view rebuild — entering or
+        // leaving the fullscreen route, navigating away from the page holding
+        // the [Video] widget and back — so each of those paused playback for
+        // no reason of the app's own. Every pause the app asks for goes through
+        // [pause]/[stop]/[open]; a 'pause' that arrives while the element is
+        // detached and playback was never asked to stop is the browser's
+        // removal pause: resume it and don't report it.
+        if (_playbackRequested && !element.isConnected && !element.ended) {
+          element.play().toDart.catchError((_) => null);
+          return;
+        }
         lock.synchronized(() async {
           // PlayerState.state.playing & PlayerState.stream.playing
           state = state.copyWith(playing: false);
@@ -395,6 +409,7 @@ class WebPlayer extends PlatformPlayer {
         synchronized: false,
       );
 
+      _playbackRequested = false;
       element.pause();
       // Enter paused state.
       // NOTE: Handled as part of [stop] logic.
@@ -424,6 +439,7 @@ class WebPlayer extends PlatformPlayer {
       _loadSource(state.playlist.medias[state.playlist.index]);
 
       if (play) {
+        _playbackRequested = true;
         element.play().toDart.catchError((error) {
           final e = error as web.DOMException;
           if (!errorController.isClosed) {
@@ -464,6 +480,7 @@ class WebPlayer extends PlatformPlayer {
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
 
+      _playbackRequested = false;
       element.innerHTML = ''.toJS;
       state = state.copyWith(track: Track());
       if (!trackController.isClosed) {
@@ -573,6 +590,7 @@ class WebPlayer extends PlatformPlayer {
       }
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
+      _playbackRequested = true;
       element.play().toDart.catchError(
         (error) {
           // PlayerStream.error
@@ -600,6 +618,7 @@ class WebPlayer extends PlatformPlayer {
       }
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
+      _playbackRequested = false;
       element.pause();
     }
 
@@ -1618,7 +1637,8 @@ class WebPlayer extends PlatformPlayer {
   void _onHlsSubtitleTrackSwitch(JSString eventName, JSObject data) {
     lock.synchronized(() async {
       try {
-        final id = (data.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+        final id =
+            (data.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
         final selected = id < 0
             ? SubtitleTrack.no()
             : state.tracks.subtitle.firstWhere(
@@ -1638,8 +1658,7 @@ class WebPlayer extends PlatformPlayer {
     lock.synchronized(() async {
       try {
         final tracks =
-            (data.getProperty('audioTracks'.toJS) as JSArray<JSObject>)
-                .toDart;
+            (data.getProperty('audioTracks'.toJS) as JSArray<JSObject>).toDart;
         final audioList = <AudioTrack>[
           AudioTrack.auto(),
           AudioTrack.no(),
@@ -1670,7 +1689,8 @@ class WebPlayer extends PlatformPlayer {
   void _onHlsAudioTrackSwitched(JSString eventName, JSObject data) {
     lock.synchronized(() async {
       try {
-        final id = (data.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
+        final id =
+            (data.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
         final selected = state.tracks.audio.firstWhere(
           (t) => t.id == id.toString(),
           orElse: () => AudioTrack.auto(),
@@ -1706,12 +1726,10 @@ class WebPlayer extends PlatformPlayer {
           ),
         );
 
-        hls.on(HlsEvents.subtitleTracksUpdated,
-            _onHlsSubtitleTracksUpdated.toJS);
         hls.on(
-            HlsEvents.subtitleTrackSwitch, _onHlsSubtitleTrackSwitch.toJS);
-        hls.on(
-            HlsEvents.audioTracksUpdated, _onHlsAudioTracksUpdated.toJS);
+            HlsEvents.subtitleTracksUpdated, _onHlsSubtitleTracksUpdated.toJS);
+        hls.on(HlsEvents.subtitleTrackSwitch, _onHlsSubtitleTrackSwitch.toJS);
+        hls.on(HlsEvents.audioTracksUpdated, _onHlsAudioTracksUpdated.toJS);
         hls.on(HlsEvents.audioTrackSwitched, _onHlsAudioTrackSwitched.toJS);
 
         hls.loadSource(media.uri);
@@ -1868,6 +1886,11 @@ class WebPlayer extends PlatformPlayer {
 
   /// [html.VideoElement] instance reference.
   late web.HTMLVideoElement element;
+
+  /// Whether the app last asked for playback ([play], [open] with play) rather
+  /// than a pause ([pause], [stop]). Used to tell the browser's own pause of a
+  /// detached element apart from a pause the app requested.
+  bool _playbackRequested = false;
 
   /// Whether the [Player] has been disposed.
   bool disposed = false;

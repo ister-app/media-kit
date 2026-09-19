@@ -481,6 +481,15 @@ class WebPlayer extends PlatformPlayer {
       await waitForVideoControllerInitializationIfAttached;
 
       _playbackRequested = false;
+      // Detach HLS.js first. It listens for the `emptied` event that clearing
+      // the source below fires and re-attaches a fresh MediaSource to the
+      // element, after which playback simply resumes — a stop that left the
+      // audio running. Also pause explicitly: clearing the source alone leaves
+      // the element in a playing state for the re-attach to pick up.
+      _startSeekSubscription?.cancel();
+      _startSeekSubscription = null;
+      _destroyHls();
+      element.pause();
       element.innerHTML = ''.toJS;
       state = state.copyWith(track: Track());
       if (!trackController.isClosed) {
@@ -488,7 +497,7 @@ class WebPlayer extends PlatformPlayer {
       }
 
       element
-        ..src = ''
+        ..removeAttribute('src')
         ..load();
 
       _playlistBeforeShuffle.clear();

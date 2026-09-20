@@ -154,6 +154,19 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
 
   ValueKey _key = const ValueKey(true);
 
+  /// The mounted [VideoState]s per [VideoController], oldest first. They all
+  /// share the controller's one <video> element, and a platform view factory
+  /// that hands out the same element moves it into whichever view was created
+  /// last. Only the newest state (the fullscreen route's, while there is one)
+  /// therefore embeds the element: otherwise a rebuild of both views — a new
+  /// media resets width & height, which drops & re-creates them — lets the
+  /// covered route's view take the element, and fullscreen stays black until
+  /// it is closed.
+  static final _states = <VideoController, List<VideoState>>{};
+  late final VideoController _controller = widget.controller;
+
+  bool get _ownsElement => _states[_controller]?.last == this;
+
   // Public API:
 
   bool isFullscreen() {
@@ -305,6 +318,15 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    final states = _states.putIfAbsent(_controller, () => []);
+    final previous = states.lastOrNull;
+    states.add(this);
+    if (previous != null) {
+      // Make the state underneath let go of the element.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (previous.mounted) previous.refreshView();
+      });
+    }
     // The native iOS player (used when the Fullscreen API is unavailable) can
     // be closed with its own button; pop the Flutter fullscreen route with it.
     onNativeVideoFullscreenEnd.add(_onNativeFullscreenEnd);
@@ -367,6 +389,18 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    final states = _states[_controller];
+    final owned = _ownsElement;
+    states?.remove(this);
+    if (states != null && states.isEmpty) {
+      _states.remove(_controller);
+    } else if (owned) {
+      // Hand the element back to the state underneath, in a fresh view.
+      final next = states!.last;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (next.mounted) next.refreshView();
+      });
+    }
     onNativeVideoFullscreenEnd.remove(_onNativeFullscreenEnd);
     _wakelock.disable();
     for (final subscription in _subscriptions) {
@@ -421,7 +455,8 @@ class VideoState extends State<Video> with WidgetsBindingObserver {
                                   builder: (context, rect, _) {
                                     if (id != null &&
                                         rect != null &&
-                                        _visible) {
+                                        _visible &&
+                                        _ownsElement) {
                                       return SizedBox(
                                         // Apply aspect ratio if provided.
                                         width:

@@ -411,6 +411,7 @@ class WebPlayer extends PlatformPlayer {
 
       _playbackRequested = false;
       element.pause();
+      _setAudioDisabled(false);
       // Enter paused state.
       // NOTE: Handled as part of [stop] logic.
       // state = state.copyWith(playing: false);
@@ -1114,8 +1115,9 @@ class WebPlayer extends PlatformPlayer {
       await waitForPlayerInitialization;
       await waitForVideoControllerInitializationIfAttached;
 
-      // Unmute the player before setting the volume.
-      if (element.muted) {
+      // Unmute the player before setting the volume — unless the muting is the
+      // "no audio" track selection.
+      if (element.muted && !_audioDisabled) {
         element.muted = false;
       }
 
@@ -1340,11 +1342,23 @@ class WebPlayer extends PlatformPlayer {
         if (!trackController.isClosed) {
           trackController.add(state.track);
         }
-      } else if (['no', 'auto'].contains(track.id)) {
-        // No direct HLS.js API for disabling audio — no action needed.
+      } else if (track.id == 'no') {
+        // No HLS.js API for disabling audio: mute the element instead.
+        _setAudioDisabled(true);
+        state = state.copyWith(track: state.track.copyWith(audio: track));
+        if (!trackController.isClosed) {
+          trackController.add(state.track);
+        }
+      } else if (track.id == 'auto') {
+        _setAudioDisabled(false);
+        state = state.copyWith(track: state.track.copyWith(audio: track));
+        if (!trackController.isClosed) {
+          trackController.add(state.track);
+        }
       } else if (_hls != null) {
         final index = int.tryParse(track.id);
         if (index != null && index >= 0) {
+          _setAudioDisabled(false);
           _hls!.audioTrack = index;
           state = state.copyWith(track: state.track.copyWith(audio: track));
           if (!trackController.isClosed) {
@@ -1698,6 +1712,8 @@ class WebPlayer extends PlatformPlayer {
   void _onHlsAudioTrackSwitched(JSString eventName, JSObject data) {
     lock.synchronized(() async {
       try {
+        // hls.js still plays (muted) audio; the selection stays "no".
+        if (_audioDisabled) return;
         final id =
             (data.getProperty('id'.toJS) as JSNumber).toDartDouble.toInt();
         final selected = state.tracks.audio.firstWhere(
@@ -1900,6 +1916,16 @@ class WebPlayer extends PlatformPlayer {
   /// than a pause ([pause], [stop]). Used to tell the browser's own pause of a
   /// detached element apart from a pause the app requested.
   bool _playbackRequested = false;
+
+  /// Whether [AudioTrack.no] is selected. hls.js cannot deselect audio, so
+  /// "no audio" mutes the element instead; [setVolume] must not undo that.
+  bool _audioDisabled = false;
+
+  void _setAudioDisabled(bool disabled) {
+    if (_audioDisabled == disabled) return;
+    _audioDisabled = disabled;
+    element.muted = disabled;
+  }
 
   /// Whether the [Player] has been disposed.
   bool disposed = false;

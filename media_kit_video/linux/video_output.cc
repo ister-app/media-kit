@@ -317,6 +317,26 @@ static gpointer render_thread_func(gpointer data) {
 // GObject lifecycle
 // ---------------------------------------------------------------------------
 
+// On X11, GTK 3 draws through GLX and leaves its GdkGLContext current on the
+// platform thread. libglvnd allows one window-system API per thread, so every
+// eglMakeCurrent there fails with EGL_BAD_ACCESS until GLX lets go. Step GDK's
+// context aside for the duration of our EGL work and put it back afterwards.
+static GdkGLContext* vo_gdk_gl_step_aside() {
+  GdkGLContext* current = gdk_gl_context_get_current();
+  if (current != NULL) {
+    g_object_ref(current);
+    gdk_gl_context_clear_current();
+  }
+  return current;
+}
+
+static void vo_gdk_gl_restore(GdkGLContext* context) {
+  if (context != NULL) {
+    gdk_gl_context_make_current(context);
+    g_object_unref(context);
+  }
+}
+
 static void video_output_dispose(GObject* object) {
   VideoOutput* self = VIDEO_OUTPUT(object);
 
@@ -350,7 +370,11 @@ static void video_output_dispose(GObject* object) {
     self->texture_gl = NULL;
 
     // 5b. Make egl_context current on this thread for resource cleanup.
+    GdkGLContext* gdk_context = NULL;
     if (self->egl_context != EGL_NO_CONTEXT) {
+      if (eglGetCurrentContext() == EGL_NO_CONTEXT) {
+        gdk_context = vo_gdk_gl_step_aside();
+      }
       eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                      self->egl_context);
     }
@@ -375,6 +399,7 @@ static void video_output_dispose(GObject* object) {
       eglDestroyContext(self->egl_display, self->egl_context);
       self->egl_context = EGL_NO_CONTEXT;
     }
+    vo_gdk_gl_restore(gdk_context);
   }
 
   // S/W
@@ -487,7 +512,9 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
     // the platform display of the default GdkDisplay) — EGL hands out the
     // same EGLDisplay for the same native display, which is all the
     // EGLImage hand-over in texture_gl.cc needs.
+    GdkGLContext* gdk_context = NULL;
     if (flutter_display == EGL_NO_DISPLAY || flutter_context == EGL_NO_CONTEXT) {
+      gdk_context = vo_gdk_gl_step_aside();
       flutter_context = EGL_NO_CONTEXT;
       flutter_display = EGL_NO_DISPLAY;
       GdkDisplay* gdk_display = gdk_display_get_default();
@@ -671,6 +698,7 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
       g_printerr(
           "media_kit: VideoOutput: EGL display or context is invalid.\n");
     }
+    vo_gdk_gl_restore(gdk_context);
   }
 #ifdef MPV_RENDER_API_TYPE_SW
   if (!hardware_acceleration_supported) {

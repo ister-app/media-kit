@@ -481,7 +481,32 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
     EGLSurface flutter_draw_surface = eglGetCurrentSurface(EGL_DRAW);
     EGLSurface flutter_read_surface = eglGetCurrentSurface(EGL_READ);
 
-    if (flutter_display != EGL_NO_DISPLAY && flutter_context != EGL_NO_CONTEXT) {
+    // Flutter >= 3.50 no longer leaves a context current on the platform
+    // thread while a plugin call runs, so there is nothing to query. Fall
+    // back to the display the embedder itself opens (fl_opengl_manager.cc:
+    // the platform display of the default GdkDisplay) — EGL hands out the
+    // same EGLDisplay for the same native display, which is all the
+    // EGLImage hand-over in texture_gl.cc needs.
+    if (flutter_display == EGL_NO_DISPLAY || flutter_context == EGL_NO_CONTEXT) {
+      flutter_context = EGL_NO_CONTEXT;
+      flutter_display = EGL_NO_DISPLAY;
+      GdkDisplay* gdk_display = gdk_display_get_default();
+      if (GDK_IS_WAYLAND_DISPLAY(gdk_display)) {
+        flutter_display = eglGetPlatformDisplayEXT(
+            EGL_PLATFORM_WAYLAND_EXT,
+            gdk_wayland_display_get_wl_display(gdk_display), NULL);
+      } else if (GDK_IS_X11_DISPLAY(gdk_display)) {
+        flutter_display = eglGetPlatformDisplayEXT(
+            EGL_PLATFORM_X11_EXT, gdk_x11_display_get_xdisplay(gdk_display),
+            NULL);
+      }
+      if (flutter_display != EGL_NO_DISPLAY &&
+          !eglInitialize(flutter_display, NULL, NULL)) {
+        flutter_display = EGL_NO_DISPLAY;
+      }
+    }
+
+    if (flutter_display != EGL_NO_DISPLAY) {
       self->egl_display = flutter_display;
 
       eglBindAPI(EGL_OPENGL_ES_API);
@@ -489,8 +514,21 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
       EGLConfig config = NULL;
       EGLint config_id = 0;
 
-      if (eglQueryContext(self->egl_display, flutter_context, EGL_CONFIG_ID,
-                          &config_id)) {
+      if (flutter_context == EGL_NO_CONTEXT) {
+        // The attributes the embedder picks its own config with.
+        const EGLint config_attribs[] = {
+            EGL_RED_SIZE,   8, EGL_GREEN_SIZE,   8, EGL_BLUE_SIZE, 8,
+            EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE,   8, EGL_STENCIL_SIZE, 8,
+            EGL_NONE};
+        EGLint num_configs = 0;
+        if (!eglChooseConfig(self->egl_display, config_attribs, &config, 1,
+                             &num_configs) ||
+            num_configs < 1) {
+          g_printerr("media_kit: VideoOutput: No usable EGL config.\n");
+          config = NULL;
+        }
+      } else if (eglQueryContext(self->egl_display, flutter_context,
+                                 EGL_CONFIG_ID, &config_id)) {
         g_print("media_kit: VideoOutput: Flutter's EGL config ID: %d\n",
                 config_id);
 
@@ -598,8 +636,9 @@ VideoOutput* video_output_new(FlTextureRegistrar* texture_registrar,
             // takes ownership.
             eglMakeCurrent(self->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                            EGL_NO_CONTEXT);
-            // Restore Flutter's context.
-            if (!eglMakeCurrent(flutter_display, flutter_draw_surface,
+            // Restore Flutter's context (when there was one).
+            if (flutter_context != EGL_NO_CONTEXT &&
+                !eglMakeCurrent(flutter_display, flutter_draw_surface,
                                 flutter_read_surface, flutter_context)) {
               g_printerr(
                   "media_kit: VideoOutput: Failed to restore Flutter EGL "
